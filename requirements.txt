@@ -11,10 +11,14 @@ xgboost>=2.0
 scikit-learn>=1.3
 pandas>=2.0
 numpy>=1.24
+scipy>=1.10
 shap>=0.43
+matplotlib>=3.7
 joblib>=1.3
 
-# Dashboard
+# Dashboard (React + Vite API Backend & Streamlit UI)
+fastapi>=0.100
+uvicorn>=0.22
 streamlit>=1.30
 plotly>=5.18
 

@@ -1,0 +1,33 @@
+query_text,table_name,frequency,avg_latency_ms
+SELECT * FROM retail_sales_dataset WHERE Gender = 'sample_val';,retail_sales_dataset,34,218.52
+SELECT * FROM retail_sales_dataset WHERE Quantity > 100;,retail_sales_dataset,31,500.85
+SELECT * FROM retail_sales_dataset WHERE High Value Order = 'sample_val';,retail_sales_dataset,33,393.68
+SELECT * FROM retail_sales_dataset WHERE City = 'sample_val';,retail_sales_dataset,25,328.34
+SELECT * FROM retail_sales_dataset WHERE Product Category = 'sample_val';,retail_sales_dataset,19,111.45
+SELECT * FROM retail_sales_dataset WHERE Gender > 100;,retail_sales_dataset,31,111.44
+SELECT * FROM retail_sales_dataset WHERE Price per Unit = 'sample_val';,retail_sales_dataset,31,63.46
+SELECT * FROM retail_sales_dataset WHERE Total Price > 100;,retail_sales_dataset,47,459.43
+SELECT * FROM retail_sales_dataset WHERE Quantity = 'sample_val';,retail_sales_dataset,30,329.55
+SELECT * FROM retail_sales_dataset WHERE Total Amount = 'sample_val';,retail_sales_dataset,32,381.96
+SELECT * FROM retail_sales_dataset WHERE Total Amount > 100;,retail_sales_dataset,28,45.09
+SELECT * FROM retail_sales_dataset WHERE Date > 100;,retail_sales_dataset,30,510.26
+SELECT * FROM retail_sales_dataset WHERE Date = 'sample_val';,retail_sales_dataset,40,442.9
+SELECT * FROM retail_sales_dataset WHERE Price per Unit > 100;,retail_sales_dataset,31,139.05
+SELECT * FROM retail_sales_dataset WHERE Order ID > 100;,retail_sales_dataset,25,124.09
+SELECT * FROM retail_sales_dataset WHERE Product Category > 100;,retail_sales_dataset,37,124.87
+SELECT * FROM retail_sales_dataset WHERE High Value Order > 100;,retail_sales_dataset,41,184.08
+SELECT * FROM retail_sales_dataset WHERE Customer ID > 100;,retail_sales_dataset,20,292.13
+SELECT * FROM retail_sales_dataset WHERE Sales Rep E-mail  > 100;,retail_sales_dataset,40,246.65
+SELECT * FROM retail_sales_dataset WHERE Delivery Status > 100;,retail_sales_dataset,48,177.7
+SELECT * FROM retail_sales_dataset WHERE Order ID = 'sample_val';,retail_sales_dataset,40,334.81
+SELECT * FROM retail_sales_dataset WHERE Total Price = 'sample_val';,retail_sales_dataset,32,103.35
+SELECT * FROM retail_sales_dataset WHERE Store Type = 'sample_val';,retail_sales_dataset,33,178.15
+SELECT * FROM retail_sales_dataset WHERE Delivery Status = 'sample_val';,retail_sales_dataset,24,214.52
+SELECT * FROM retail_sales_dataset WHERE Sales Rep E-mail  = 'sample_val';,retail_sales_dataset,28,258.47
+SELECT * FROM retail_sales_dataset WHERE Age > 100;,retail_sales_dataset,23,419.74
+SELECT * FROM retail_sales_dataset WHERE City > 100;,retail_sales_dataset,35,132.84
+SELECT * FROM retail_sales_dataset WHERE Customer ID = 'sample_val';,retail_sales_dataset,33,286.97
+SELECT * FROM retail_sales_dataset WHERE Age = 'sample_val';,retail_sales_dataset,28,325.28
+SELECT * FROM retail_sales_dataset WHERE Store Type > 100;,retail_sales_dataset,22,57.76
+SELECT * FROM retail_sales_dataset WHERE Payment Method > 100;,retail_sales_dataset,21,332.7
+SELECT * FROM retail_sales_dataset WHERE Payment Method = 'sample_val';,retail_sales_dataset,28,118.56

@@ -310,11 +310,15 @@ def estimate_column_selectivity(
     col_stats: ColumnStats,
     predicates: Sequence[PredicateInfo],
     is_join_col: bool = False,
+    has_table_where_preds: bool = False,
 ) -> float:
     """Estimate fraction of rows (0.0 to 1.0) matching predicates on *col_stats*."""
     col_preds = [p for p in predicates if p.column == col_stats.column_name]
     if not col_preds:
-        if is_join_col and col_stats.cardinality > 0:
+        # A join column without a local WHERE predicate only acts as a selective
+        # probe key when the primary table has no local WHERE predicates of its own
+        # (i.e., the joined dimension table is filtered to a single/few keys and drives the join).
+        if is_join_col and not has_table_where_preds and col_stats.cardinality > 0:
             return 1.0 / col_stats.cardinality
         return 1.0
 
@@ -522,7 +526,10 @@ def _extract_pos_features(
     p_type = parsed.predicate_types.get(col_name, "")
 
     sel = estimate_column_selectivity(
-        cs, parsed.predicates, is_join_col=(col_name in parsed.join_columns)
+        cs,
+        parsed.predicates,
+        is_join_col=(col_name in parsed.join_columns),
+        has_table_where_preds=(len(parsed.where_columns) > 0),
     )
     return {
         "cardinality": float(cs.cardinality),
@@ -575,13 +582,16 @@ def extract_features(
     idx_size_mb = estimate_index_size_mb(t_stats.table_rows, col_widths)
 
     # Effective B-tree index selectivity (respecting left-prefix rule)
-    if f1["in_where"] > 0 or f1["in_join"] > 0:
+    col1_filters_table = f1["in_where"] > 0 or (
+        f1["in_join"] > 0 and len(parsed.where_columns) == 0
+    )
+    if col1_filters_table:
         eff_sel = f1["selectivity"]
         # Second column further narrows B-tree range only if col1 uses equality/IN/join
         if (
             col2 is not None
             and (f1["pred_equality"] > 0 or f1["pred_in"] > 0 or f1["in_join"] > 0)
-            and (f2["in_where"] > 0 or f2["in_join"] > 0)
+            and f2["in_where"] > 0
         ):
             eff_sel *= f2["selectivity"]
     elif (

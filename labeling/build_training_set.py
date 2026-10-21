@@ -1,673 +1,512 @@
 """
 labeling/build_training_set.py
 ──────────────────────────────
-Builds an empirical training/evaluation dataset of >= 300 varied SQL queries
-instantiated from 21 query templates against the live MySQL ``orders_benchmark``
-and ``customers_benchmark`` tables.
+Schema-agnostic workload generator and live MySQL speedup labeler for real
+CTU Prague Relational Learning Repository databases.
+Zero hardcoded table or column names.
 
-For each (query, candidate_index):
-  1. Measures baseline median execution time over 5 runs (1 warm-up discarded)
-     and EXPLAIN rows examined with NO secondary indexes.
-  2. Creates the candidate index on MySQL, runs ANALYZE TABLE, and measures
-     median execution time over 5 runs (1 warm-up discarded) and EXPLAIN rows
-     examined WITH the index.
-  3. Records speedup = time_before / time_after, log_speedup = log(speedup),
-     rows_before, rows_after, and all extracted catalog/query/EXPLAIN features.
-  4. Drops the candidate index before moving on.
-
-Restartable: saves progress after every measurement to ``labeling/training_data.csv``
-and skips already-recorded ``(query_id, index_name)`` pairs on restart.
-
-Template holdout guarantee:
-  - Demo templates (T03, T07, T11) and held-out test templates (T16, T19) are
-    tagged with ``split_group`` in {'demo_holdout', 'test'} so ``models/train.py``
-    trains strictly on ``split_group == 'train'``.
+1. Workload Generation (``generate_workload_for_database``):
+   - Introspects tables, columns, data types, real value distributions (including
+     real skew), and foreign keys (from ``data/original_indexes.json`` and
+     ``information_schema``) in any database.
+   - Generates >= 300 deduplicated SQL SELECT queries per database covering:
+       * Point lookups (high-cardinality and low-cardinality/skewed values)
+       * Range predicates (>, >=, <, <=, BETWEEN)
+       * IN-lists
+       * LIKE prefix predicates (on string columns)
+       * Multi-column equality + range
+       * Equality + ORDER BY ... LIMIT
+       * GROUP BY aggregations (with and without WHERE filters)
+       * Foreign-key JOIN queries
+2. Live Speedup Labeling (``label_workload``):
+   - For each query and each generated 1- and 2-column candidate index:
+       * Measures baseline median runtime over 5 runs (1 warm-up discarded)
+       * Creates the candidate index on local MySQL
+       * Measures indexed median runtime over 5 runs (1 warm-up discarded)
+       * Records speedup = before / after and EXPLAIN rows before / after
+       * Drops the candidate index immediately
+   - Restartable (skips already-labeled query_ids), prints live progress, and
+     saves to ``labeling/training_data.csv``.
 """
 from __future__ import annotations
 
-import argparse
-import csv
+import json
 import math
 import random
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import pandas as pd
 
 import config
 from candidates.generator import CandidateIndex, generate_candidates
 from db.mysql_adapter import MySQLAdapter
-from features.extract import FEATURE_NAMES, StatsCache, extract_features
-from parsing.query_parser import parse_query
+from features.extract import (
+    ColumnStats,
+    FEATURE_NAMES,
+    StatsCache,
+    TableStats,
+    extract_features,
+)
+from parsing.query_parser import ParsedQuery, parse_query
 
 
-@dataclass(frozen=True)
-class QueryInstance:
-    """A single instantiated query belonging to a named template."""
-
-    query_id: str
-    template_id: str
-    template_desc: str
-    split_group: str  # 'train' | 'test' | 'demo_holdout'
-    sql: str
+def _sql_lit(val: Any) -> str:
+    if val is None:
+        return "NULL"
+    if isinstance(val, (int, float)):
+        return str(val)
+    s = str(val).replace("\\", "\\\\").replace("'", "''")
+    return f"'{s}'"
 
 
-STATUS_ALL = ["completed", "shipped", "processing", "cancelled", "returned"]
-REGIONS = [
-    "North", "South", "East", "West",
-    "NorthEast", "NorthWest", "SouthEast", "SouthWest",
-]
-PAYMENTS = ["credit_card", "debit_card", "paypal", "bank_transfer"]
-TIERS = ["bronze", "silver", "gold", "platinum"]
-START_DATE = date(2022, 1, 1)
+def _fetch_distinct_sample_values(
+    db: MySQLAdapter,
+    table: str,
+    col: str,
+    limit: int = 120,
+) -> List[Any]:
+    """Sample distinct non-null values from a real column (both frequent and rare)."""
+    vals: List[Any] = []
+    try:
+        rows = db.execute(
+            f"SELECT DISTINCT `{col}` AS v FROM "
+            f"(SELECT `{col}` FROM `{table}` WHERE `{col}` IS NOT NULL LIMIT 15000) AS s "
+            f"LIMIT {limit}"
+        )
+        for r in rows:
+            if r.get("v") is not None:
+                vals.append(r["v"])
+    except Exception:
+        pass
+    return vals
 
 
-def _rand_date(rng: random.Random, max_offset: int = 1000) -> str:
-    return (START_DATE + timedelta(days=rng.randint(0, max_offset))).isoformat()
-
-
-def _rand_date_window(rng: random.Random, window_days: int = 14) -> Tuple[str, str]:
-    d1 = START_DATE + timedelta(days=rng.randint(0, 1050 - window_days))
-    d2 = d1 + timedelta(days=window_days)
-    return d1.isoformat(), d2.isoformat()
-
-
-def generate_workload(
-    queries_per_template: int = 15,
-    num_customers: int = 100_000,
-    num_products: int = 5_000,
+def generate_workload_for_database(
+    db: MySQLAdapter,
+    db_name: str,
+    target_min_queries: int = 300,
     seed: int = 42,
-) -> List[QueryInstance]:
-    """Generate 21 * queries_per_template (default 315) varied SQL queries."""
-    rng = random.Random(seed)
+) -> List[Dict[str, Any]]:
+    """Generate >= 300 deduplicated real SQL SELECT queries for *db_name*."""
+    rng = random.Random(seed + sum(ord(c) for c in db_name))
+    db.use_database(db_name)
+    stats_cache = StatsCache(db)
 
-    templates: List[Tuple[str, str, str, Callable[[int, random.Random], str]]] = [
-        # ── Point Lookups (Equality) ────────────────────────────
-        (
-            "T01",
-            "Point lookup on high-cardinality customer_id",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, product_id, amount, order_date "
-                f"FROM orders_benchmark WHERE customer_id = {r.randint(1, num_customers)}"
-            ),
-        ),
-        (
-            "T02",
-            "Point lookup on medium-cardinality product_id",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, product_id, status, amount "
-                f"FROM orders_benchmark WHERE product_id = {r.randint(1, num_products)}"
-            ),
-        ),
-        (
-            "T03",
-            "Low-cardinality skewed filter on status (Demo Holdout)",
-            "demo_holdout",
-            lambda i, r: (
-                f"SELECT status, COUNT(*) AS order_cnt, AVG(amount) AS avg_amt "
-                f"FROM orders_benchmark "
-                f"WHERE status = '{STATUS_ALL[i % len(STATUS_ALL)]}' "
-                f"GROUP BY status"
-            ),
-        ),
-        (
-            "T04",
-            "Low-cardinality filter on region with aggregate",
-            "train",
-            lambda i, r: (
-                f"SELECT region, COUNT(*) AS cnt, SUM(amount) AS total_amt "
-                f"FROM orders_benchmark "
-                f"WHERE region = '{REGIONS[i % len(REGIONS)]}' "
-                f"GROUP BY region"
-            ),
-        ),
-        (
-            "T05",
-            "Low-cardinality filter on payment_method with aggregate",
-            "train",
-            lambda i, r: (
-                f"SELECT payment_method, COUNT(*) AS cnt, AVG(amount) AS avg_amt "
-                f"FROM orders_benchmark "
-                f"WHERE payment_method = '{PAYMENTS[i % len(PAYMENTS)]}' "
-                f"GROUP BY payment_method"
-            ),
-        ),
-        # ── Multi-Column Equality & IN Predicates ───────────────
-        (
-            "T06",
-            "Composite equality on customer_id and status",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, status, amount, order_date "
-                f"FROM orders_benchmark "
-                f"WHERE customer_id = {r.randint(1, num_customers)} "
-                f"AND status = '{r.choice(STATUS_ALL)}'"
-            ),
-        ),
-        (
-            "T07",
-            "Composite equality on product_id and region (Demo Holdout)",
-            "demo_holdout",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, product_id, region, amount "
-                f"FROM orders_benchmark "
-                f"WHERE product_id = {r.randint(1, num_products)} "
-                f"AND region = '{r.choice(REGIONS)}'"
-            ),
-        ),
-        (
-            "T08",
-            "IN predicate on product_id with status equality",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, product_id, status, amount "
-                f"FROM orders_benchmark "
-                f"WHERE product_id IN ({r.randint(1, num_products)}, "
-                f"{r.randint(1, num_products)}, {r.randint(1, num_products)}) "
-                f"AND status = '{r.choice(STATUS_ALL)}' LIMIT 100"
-            ),
-        ),
-        (
-            "T09",
-            "IN predicate on customer_id",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, order_date, amount "
-                f"FROM orders_benchmark "
-                f"WHERE customer_id IN ({r.randint(1, num_customers)}, "
-                f"{r.randint(1, num_customers)}, {r.randint(1, num_customers)}, "
-                f"{r.randint(1, num_customers)})"
-            ),
-        ),
-        # ── Range & LIKE Prefix Queries ─────────────────────────
-        (
-            "T10",
-            "Date range window on order_date",
-            "train",
-            lambda i, r: (
-                lambda d1, d2: (
-                    f"SELECT order_date, COUNT(*) AS cnt, SUM(amount) AS sum_amt "
-                    f"FROM orders_benchmark "
-                    f"WHERE order_date BETWEEN '{d1}' AND '{d2}' "
-                    f"GROUP BY order_date"
-                )
-            )(*_rand_date_window(r, window_days=r.choice([3, 7, 15, 60]))),
-        ),
-        (
-            "T11",
-            "Customer equality + order_date range + ORDER BY (Demo Holdout)",
-            "demo_holdout",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, product_id, order_date, amount "
-                f"FROM orders_benchmark "
-                f"WHERE customer_id = {r.randint(1, num_customers)} "
-                f"AND order_date >= '{_rand_date(r, 900)}' "
-                f"ORDER BY order_date DESC LIMIT 25"
-            ),
-        ),
-        (
-            "T12",
-            "Product equality + amount range",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, product_id, amount, order_date "
-                f"FROM orders_benchmark "
-                f"WHERE product_id = {r.randint(1, num_products)} "
-                f"AND amount >= {r.randint(1000, 4500)}.00"
-            ),
-        ),
-        (
-            "T13",
-            "LIKE prefix on payment_method with product_id equality",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, product_id, payment_method, amount "
-                f"FROM orders_benchmark "
-                f"WHERE payment_method LIKE '{r.choice(['credit%', 'debit%', 'pay%', 'bank%'])}' "
-                f"AND product_id = {r.randint(1, num_products)}"
-            ),
-        ),
-        (
-            "T14",
-            "Narrow high-value range on amount with LIMIT",
-            "train",
-            lambda i, r: (
-                lambda base: (
-                    f"SELECT order_id, customer_id, amount, order_date "
-                    f"FROM orders_benchmark "
-                    f"WHERE amount BETWEEN {base:.2f} AND {base + 15.0:.2f} "
-                    f"LIMIT 50"
-                )
-            )(r.uniform(4800.0, 4980.0)),
-        ),
-        # ── JOIN Queries on customers_benchmark ─────────────────
-        (
-            "T15",
-            "JOIN orders_benchmark and customers_benchmark on customer_id",
-            "train",
-            lambda i, r: (
-                f"SELECT o.order_id, o.amount, o.order_date, c.name, c.tier "
-                f"FROM orders_benchmark o "
-                f"JOIN customers_benchmark c ON o.customer_id = c.customer_id "
-                f"WHERE c.customer_id = {r.randint(1, num_customers)}"
-            ),
-        ),
-        (
-            "T16",
-            "JOIN with product_id and customer tier filter (Test Holdout)",
-            "test",
-            lambda i, r: (
-                f"SELECT o.order_id, o.product_id, o.amount, c.name, c.tier "
-                f"FROM orders_benchmark o "
-                f"JOIN customers_benchmark c ON o.customer_id = c.customer_id "
-                f"WHERE o.product_id = {r.randint(1, num_products)} "
-                f"AND c.tier = '{r.choice(TIERS)}'"
-            ),
-        ),
-        (
-            "T17",
-            "JOIN with customer_id IN list and order_date range",
-            "train",
-            lambda i, r: (
-                f"SELECT o.order_id, o.customer_id, o.order_date, o.amount, c.tier "
-                f"FROM orders_benchmark o "
-                f"JOIN customers_benchmark c ON o.customer_id = c.customer_id "
-                f"WHERE o.customer_id IN ({r.randint(1, num_customers)}, "
-                f"{r.randint(1, num_customers)}, {r.randint(1, num_customers)}) "
-                f"AND o.order_date >= '{_rand_date(r, 800)}'"
-            ),
-        ),
-        # ── GROUP BY Queries ────────────────────────────────────
-        (
-            "T18",
-            "GROUP BY status for a specific customer_id",
-            "train",
-            lambda i, r: (
-                f"SELECT status, COUNT(*) AS cnt, SUM(amount) AS total_spent "
-                f"FROM orders_benchmark "
-                f"WHERE customer_id = {r.randint(1, num_customers)} "
-                f"GROUP BY status"
-            ),
-        ),
-        (
-            "T19",
-            "GROUP BY region for a specific product_id (Test Holdout)",
-            "test",
-            lambda i, r: (
-                f"SELECT region, COUNT(*) AS cnt, AVG(amount) AS avg_amt "
-                f"FROM orders_benchmark "
-                f"WHERE product_id = {r.randint(1, num_products)} "
-                f"GROUP BY region"
-            ),
-        ),
-        # ── ORDER BY with LIMIT Queries ─────────────────────────
-        (
-            "T20",
-            "Customer filter with ORDER BY amount DESC LIMIT 20",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, customer_id, amount, order_date "
-                f"FROM orders_benchmark "
-                f"WHERE customer_id = {r.randint(1, num_customers)} "
-                f"ORDER BY amount DESC LIMIT 20"
-            ),
-        ),
-        (
-            "T21",
-            "Low-cardinality status + region filter with ORDER BY order_date LIMIT 30",
-            "train",
-            lambda i, r: (
-                f"SELECT order_id, status, region, order_date, amount "
-                f"FROM orders_benchmark "
-                f"WHERE status = '{STATUS_ALL[i % len(STATUS_ALL)]}' "
-                f"AND region = '{REGIONS[i % len(REGIONS)]}' "
-                f"ORDER BY order_date DESC LIMIT 30"
-            ),
-        ),
+    # Load saved foreign keys from original_indexes.json if available
+    saved_fks: List[Dict[str, str]] = []
+    if config.ORIGINAL_INDEXES_PATH.exists():
+        try:
+            orig_data = json.loads(config.ORIGINAL_INDEXES_PATH.read_text(encoding="utf-8"))
+            saved_fks = orig_data.get(db_name, {}).get("foreign_keys", [])
+        except Exception:
+            saved_fks = []
+
+    tables_info = db.list_tables(db_name)
+    # Focus on tables with at least 500 rows so queries are meaningful
+    eligible_tables = [
+        str(t["table_name"])
+        for t in tables_info
+        if int(t.get("est_rows") or 0) >= 500
     ]
+    if not eligible_tables and tables_info:
+        eligible_tables = [str(tables_info[0]["table_name"])]
 
-    workload: List[QueryInstance] = []
-    q_counter = 1
-    for t_id, t_desc, split_grp, builder in templates:
-        for i in range(queries_per_template):
-            sql = builder(i, rng)
-            q_id = f"Q{q_counter:03d}"
-            workload.append(
-                QueryInstance(
-                    query_id=q_id,
-                    template_id=t_id,
-                    template_desc=t_desc,
-                    split_group=split_grp,
-                    sql=sql,
+    # Introspect eligible tables and sample real values per column
+    table_stats_map: Dict[str, TableStats] = {}
+    col_values_map: Dict[Tuple[str, str], List[Any]] = {}
+
+    for t_name in eligible_tables[:6]:
+        ts = stats_cache.get_table_stats(t_name)
+        if ts.table_rows < 200:
+            continue
+        table_stats_map[t_name] = ts
+        for c_name, cs in ts.columns.items():
+            if cs.is_indexable and cs.cardinality >= 1:
+                vals = _fetch_distinct_sample_values(db, ts.table_name, c_name, limit=120)
+                if vals:
+                    col_values_map[(ts.table_name, c_name)] = vals
+
+    generated: List[Dict[str, Any]] = []
+    seen_sql: Set[str] = set()
+
+    def _add_query(sql: str, table: str, category: str) -> bool:
+        norm = " ".join(sql.strip().split())
+        if norm in seen_sql:
+            return False
+        seen_sql.add(norm)
+        generated.append(
+            {
+                "database_name": db_name,
+                "table_name": table,
+                "category": category,
+                "sql": norm,
+            }
+        )
+        return True
+
+    # Generate diverse queries across all eligible tables in the database
+    for t_name, ts in table_stats_map.items():
+        pk_set = {c.lower() for c in ts.primary_key_columns}
+        non_pk_cols = [
+            cs
+            for cs in ts.columns.values()
+            if cs.is_indexable
+            and cs.column_name.lower() not in pk_set
+            and (ts.table_name, cs.column_name) in col_values_map
+        ]
+        # If all columns are part of a composite PK (e.g., lapTimes or Walmart train),
+        # include all indexable columns!
+        if len(non_pk_cols) < 2:
+            non_pk_cols = [
+                cs
+                for cs in ts.columns.values()
+                if cs.is_indexable and (ts.table_name, cs.column_name) in col_values_map
+            ]
+
+        if not non_pk_cols:
+            continue
+
+        proj_cols = [c.column_name for c in list(ts.columns.values())[:5]]
+        proj = ", ".join(f"`{c}`" for c in proj_cols)
+
+        range_cols = [
+            cs
+            for cs in non_pk_cols
+            if cs.data_type_code in (1, 2, 3) and len(col_values_map[(ts.table_name, cs.column_name)]) >= 4
+        ]
+        str_cols = [
+            cs
+            for cs in non_pk_cols
+            if cs.data_type_code == 4 and len(col_values_map[(ts.table_name, cs.column_name)]) >= 2
+        ]
+
+        # (A) Point lookups across columns and real sampled values (including skewed values)
+        for cs in non_pk_cols:
+            vals = col_values_map[(ts.table_name, cs.column_name)]
+            for v in vals[:45]:
+                _add_query(
+                    f"SELECT {proj} FROM `{ts.table_name}` WHERE `{cs.column_name}` = {_sql_lit(v)}",
+                    ts.table_name,
+                    "point_lookup",
                 )
+                _add_query(
+                    f"SELECT {proj} FROM `{ts.table_name}` WHERE `{cs.column_name}` = {_sql_lit(v)} LIMIT 25",
+                    ts.table_name,
+                    "point_lookup_limit",
+                )
+
+        # (B) Range predicates (>, >=, <, <=, BETWEEN)
+        for r_col in range_cols:
+            vals = sorted(col_values_map[(ts.table_name, r_col.column_name)], key=lambda x: str(x))
+            for i in range(0, min(len(vals) - 2, 35)):
+                v_low = vals[i]
+                v_high = vals[min(i + 2, len(vals) - 1)]
+                _add_query(
+                    f"SELECT {proj} FROM `{ts.table_name}` WHERE `{r_col.column_name}` >= {_sql_lit(v_low)} LIMIT 50",
+                    ts.table_name,
+                    "range_scan",
+                )
+                _add_query(
+                    f"SELECT {proj} FROM `{ts.table_name}` WHERE `{r_col.column_name}` BETWEEN {_sql_lit(v_low)} AND {_sql_lit(v_high)}",
+                    ts.table_name,
+                    "between_range",
+                )
+
+        # (C) IN-list queries
+        for cs in non_pk_cols:
+            vals = col_values_map[(ts.table_name, cs.column_name)]
+            if len(vals) >= 4:
+                for i in range(0, min(len(vals) - 3, 30)):
+                    chunk = vals[i : i + 3]
+                    in_str = ", ".join(_sql_lit(x) for x in chunk)
+                    _add_query(
+                        f"SELECT {proj} FROM `{ts.table_name}` WHERE `{cs.column_name}` IN ({in_str})",
+                        ts.table_name,
+                        "in_list",
+                    )
+
+        # (D) LIKE prefix queries on string columns
+        for s_col in str_cols:
+            vals = col_values_map[(ts.table_name, s_col.column_name)]
+            for v in vals[:20]:
+                s_txt = str(v).strip()
+                if len(s_txt) >= 3:
+                    prefix = s_txt[:3].replace("'", "''")
+                    _add_query(
+                        f"SELECT {proj} FROM `{ts.table_name}` WHERE `{s_col.column_name}` LIKE '{prefix}%' LIMIT 50",
+                        ts.table_name,
+                        "like_prefix",
+                    )
+
+        # (E) Composite equality + range + ORDER BY ... LIMIT
+        for c1 in non_pk_cols:
+            vals1 = col_values_map[(ts.table_name, c1.column_name)]
+            for c2 in non_pk_cols:
+                if c1.column_name == c2.column_name:
+                    continue
+                vals2 = col_values_map[(ts.table_name, c2.column_name)]
+                for v1 in vals1[:25]:
+                    v2 = rng.choice(vals2)
+                    if c2.data_type_code in (1, 2, 3):
+                        _add_query(
+                            f"SELECT {proj} FROM `{ts.table_name}` "
+                            f"WHERE `{c1.column_name}` = {_sql_lit(v1)} "
+                            f"AND `{c2.column_name}` >= {_sql_lit(v2)} "
+                            f"ORDER BY `{c2.column_name}` DESC LIMIT 25",
+                            ts.table_name,
+                            "composite_eq_range_orderby",
+                        )
+                    _add_query(
+                        f"SELECT {proj} FROM `{ts.table_name}` "
+                        f"WHERE `{c1.column_name}` = {_sql_lit(v1)} "
+                        f"AND `{c2.column_name}` = {_sql_lit(v2)}",
+                        ts.table_name,
+                        "composite_two_eq",
+                    )
+
+        # (F) GROUP BY aggregations
+        for c1 in non_pk_cols:
+            vals1 = col_values_map[(ts.table_name, c1.column_name)]
+            _add_query(
+                f"SELECT `{c1.column_name}`, COUNT(*) AS cnt FROM `{ts.table_name}` GROUP BY `{c1.column_name}` LIMIT 30",
+                ts.table_name,
+                "group_by_unfiltered",
             )
-            q_counter += 1
+            for c2 in non_pk_cols:
+                if c1.column_name == c2.column_name:
+                    continue
+                for v1 in vals1[:20]:
+                    _add_query(
+                        f"SELECT `{c2.column_name}`, COUNT(*) AS cnt FROM `{ts.table_name}` "
+                        f"WHERE `{c1.column_name}` = {_sql_lit(v1)} GROUP BY `{c2.column_name}`",
+                        ts.table_name,
+                        "group_by_filtered",
+                    )
 
-    return workload
+        # (G) Foreign-key JOIN queries
+        for fk in saved_fks:
+            if fk["table_name"].lower() == ts.table_name.lower():
+                ref_tbl = fk["ref_table_name"]
+                fk_col = fk["column_name"]
+                ref_col = fk["ref_column_name"]
+                for c1 in non_pk_cols:
+                    vals1 = col_values_map[(ts.table_name, c1.column_name)]
+                    for v1 in vals1[:25]:
+                        _add_query(
+                            f"SELECT t1.`{fk_col}`, t1.`{c1.column_name}` "
+                            f"FROM `{ts.table_name}` t1 "
+                            f"JOIN `{ref_tbl}` t2 ON t1.`{fk_col}` = t2.`{ref_col}` "
+                            f"WHERE t1.`{c1.column_name}` = {_sql_lit(v1)} LIMIT 30",
+                            ts.table_name,
+                            "fk_join",
+                        )
 
+    # Shuffle deterministically while ensuring all categories are well-represented
+    rng.shuffle(generated)
+    if len(generated) < target_min_queries:
+        # Pad with additional value combinations if needed
+        for t_name, ts in table_stats_map.items():
+            for (tbl_k, col_k), vals in col_values_map.items():
+                if tbl_k != ts.table_name:
+                    continue
+                for v in vals:
+                    for lim in (10, 20, 50, 100):
+                        _add_query(
+                            f"SELECT * FROM `{ts.table_name}` WHERE `{col_k}` = {_sql_lit(v)} LIMIT {lim}",
+                            ts.table_name,
+                            "point_lookup_limit",
+                        )
+                        if len(generated) >= target_min_queries:
+                            break
+                    if len(generated) >= target_min_queries:
+                        break
 
-CSV_COLUMNS: List[str] = [
-    "query_id",
-    "template_id",
-    "template_desc",
-    "split_group",
-    "sql",
-    "template_sql",
-    "table_name",
-    "index_name",
-    "index_columns",
-    "ddl",
-    "source_clauses",
-    "time_before_s",
-    "time_after_s",
-    "speedup",
-    "log_speedup",
-    "rows_before",
-    "rows_after",
-    "access_type_before",
-    "access_type_after",
-    "key_used_after",
-] + FEATURE_NAMES
-
-
-def _load_completed_pairs(
-    csv_path: Path,
-) -> Tuple[Set[Tuple[str, str]], Dict[str, Tuple[float, int, str]]]:
-    """Load already-measured (query_id, index_name) pairs and baseline query timings."""
-    completed: Set[Tuple[str, str]] = set()
-    baseline_timings: Dict[str, Tuple[float, int, str]] = {}
-    if not csv_path.exists():
-        return completed, baseline_timings
-
-    with csv_path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            qid = row.get("query_id", "")
-            idx_name = row.get("index_name", "")
-            if qid and idx_name:
-                completed.add((qid, idx_name))
-                try:
-                    tb = float(row["time_before_s"])
-                    rb = int(float(row["rows_before"]))
-                    ab = str(row.get("access_type_before", "ALL"))
-                    baseline_timings[qid] = (tb, rb, ab)
-                except (KeyError, ValueError):
-                    pass
-    return completed, baseline_timings
+    return generated
 
 
-def _explain_primary_row(
-    db: MySQLAdapter, sql: str, primary_table: str = config.BENCHMARK_TABLE
-) -> Tuple[int, str, str]:
-    """Return (estimated_rows, access_type, key_used) for primary_table from EXPLAIN."""
-    plan = db.explain(sql)
-    target = None
-    for r in plan:
-        tbl = str(r.get("table") or "").lower()
-        if tbl in (primary_table.lower(), "o"):
-            target = r
-            break
-    if target is None and plan:
-        target = plan[0]
-    if target is None:
-        return 0, "ALL", ""
-    rows_est = int(target.get("rows") or 0)
-    acc_type = str(target.get("type") or "ALL")
-    key_used = str(target.get("key") or "")
-    return rows_est, acc_type, key_used
+def build_all_workloads(out_csv: str = config.WORKLOAD_CSV) -> pd.DataFrame:
+    """Generate >= 300 deduplicated queries for each of the 6 real CTU Prague databases."""
+    db = MySQLAdapter()
+    db.connect()
+    all_rows: List[Dict[str, Any]] = []
+    try:
+        for db_name in config.SELECTED_CTU_DATABASES:
+            qs = generate_workload_for_database(db, db_name, target_min_queries=310)
+            split_group = "train" if db_name in config.TRAIN_DATABASES else "test"
+            for idx, q in enumerate(qs, 1):
+                q["query_id"] = f"{db_name}_Q{idx:03d}"
+                q["split_group"] = split_group
+                all_rows.append(q)
+            print(
+                f"  [WORKLOAD] `{db_name:<14}` ({split_group:<5}): "
+                f"generated {len(qs)} deduplicated real queries"
+            )
+    finally:
+        db.close()
+
+    df = pd.DataFrame(all_rows)
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    print(f"Saved {len(df)} total generated queries across {len(config.SELECTED_CTU_DATABASES)} databases to {out_csv}")
+    return df
 
 
-_tls = threading.local()
+def select_representative_queries_for_labeling(
+    workload_df: pd.DataFrame,
+    queries_per_db: int = 28,
+) -> pd.DataFrame:
+    """Select stratified queries across categories from each database for physical index labeling."""
+    selected_chunks: List[pd.DataFrame] = []
+    for db_name, grp in workload_df.groupby("database_name", sort=False):
+        # Prioritize largest table in that database and diverse query categories
+        cats = grp["category"].unique().tolist()
+        per_cat = max(3, queries_per_db // max(1, len(cats)))
+        picked_indices: List[int] = []
+        for cat in cats:
+            sub = grp[grp["category"] == cat]
+            picked_indices.extend(sub.index[:per_cat].tolist())
+        if len(picked_indices) < queries_per_db:
+            remaining = [i for i in grp.index if i not in picked_indices]
+            picked_indices.extend(remaining[: queries_per_db - len(picked_indices)])
+        selected_chunks.append(grp.loc[picked_indices[:queries_per_db]])
+    return pd.concat(selected_chunks, ignore_index=True)
 
 
-def _get_worker_db() -> MySQLAdapter:
-    """Return a thread-local MySQLAdapter connection for read-only timing runs."""
-    db: MySQLAdapter | None = getattr(_tls, "db", None)
-    if db is None or not db.is_connected():
-        db = MySQLAdapter()
-        db.connect()
-        _tls.db = db
-    return db
-
-
-def _measure_single_query(
-    sql: str, runs: int, warmup: int, fast_if_unused: bool = False
-) -> Tuple[float, int, str, str]:
-    """Execute *sql* over *runs* (discarding *warmup*) and return timing + EXPLAIN."""
-    wdb = _get_worker_db()
-    rows_est, acc_type, key_used = _explain_primary_row(wdb, sql)
-    actual_runs = 2 if (fast_if_unused and not key_used and acc_type.upper() == "ALL") else runs
-    med_time, _ = wdb.timed_execute(sql, runs=actual_runs, warmup=warmup)
-    return med_time, rows_est, acc_type, key_used
-
-
-def build_training_set(
+def label_workload(
+    workload_csv: str = config.WORKLOAD_CSV,
     output_csv: str = config.LABEL_CSV,
-    queries_per_template: int = 15,
-    max_candidates_per_query: int = 4,
+    queries_per_db: int = 26,
     runs: int = config.LABELING_RUNS,
-    warmup: int = 1,
-    workers: int = 3,
-) -> None:
-    """Run the full empirical labeling pipeline with restartable CSV checkpointing."""
-    csv_path = Path(output_csv)
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
+) -> pd.DataFrame:
+    """Measure real before/after execution times and EXPLAIN rows on local MySQL."""
+    if not Path(workload_csv).exists():
+        build_all_workloads(workload_csv)
+
+    w_df = pd.read_csv(workload_csv)
+    target_df = select_representative_queries_for_labeling(w_df, queries_per_db=queries_per_db)
+
+    out_path = Path(output_csv)
+    existing_rows: List[Dict[str, Any]] = []
+    completed_qids: Set[str] = set()
+    if out_path.exists():
+        try:
+            old_df = pd.read_csv(out_path)
+            if "database_name" in old_df.columns and set(old_df["database_name"]).issubset(
+                set(config.SELECTED_CTU_DATABASES)
+            ):
+                existing_rows = old_df.to_dict("records")
+                completed_qids = set(old_df["query_id"].astype(str).unique())
+                print(f"Resuming from {len(existing_rows)} existing rows ({len(completed_qids)} queries)...")
+        except Exception:
+            pass
 
     db = MySQLAdapter()
     db.connect()
-    print(f"Connected to MySQL {db.host}:{db.port}/{db.database}")
-
-    # Ensure InnoDB buffer pool can hold the benchmark table in memory
-    try:
-        db.execute_ddl("SET GLOBAL innodb_buffer_pool_size = 1073741824")
-    except Exception:
-        pass
-
-    # Always start with zero secondary indexes on orders_benchmark
-    existing_sec = db.get_non_primary_indexes(config.BENCHMARK_TABLE)
-    if existing_sec:
-        print(f"Dropping leftover secondary indexes: {existing_sec}")
-        db.drop_all_secondary_indexes(config.BENCHMARK_TABLE)
-        db.analyze_table(config.BENCHMARK_TABLE)
-
-    print("Collecting live catalog statistics for feature extraction...")
     stats_cache = StatsCache(db)
-    t_stats = stats_cache.get_table_stats(config.BENCHMARK_TABLE)
-    num_customers = max(1000, t_stats.columns["customer_id"].cardinality)
-    num_products = max(100, t_stats.columns["product_id"].cardinality)
-    print(
-        f"Table `{t_stats.table_name}`: {t_stats.table_rows:,} rows | "
-        f"customer_id card={num_customers:,} | product_id card={num_products:,}"
-    )
 
-    workload = generate_workload(
-        queries_per_template=queries_per_template,
-        num_customers=num_customers,
-        num_products=num_products,
-    )
-    print(f"Generated {len(workload)} queries across 21 templates.")
-
-    # Parse queries and generate candidates
-    query_map: Dict[str, QueryInstance] = {q.query_id: q for q in workload}
-    parsed_map = {q.query_id: parse_query(q.sql) for q in workload}
-    candidates_by_query: Dict[str, List[CandidateIndex]] = {
-        q.query_id: generate_candidates(
-            parsed_map[q.query_id], max_candidates=max_candidates_per_query
-        )
-        for q in workload
-    }
-
-    total_pairs = sum(len(v) for v in candidates_by_query.values())
-    completed_pairs, baseline_timings = _load_completed_pairs(csv_path)
-    print(
-        f"Total (query, candidate) pairs: {total_pairs} | "
-        f"Already completed in CSV: {len(completed_pairs)}"
-    )
-
-    if len(completed_pairs) >= total_pairs:
-        print("All (query, candidate) pairs are already labeled in CSV!")
-        db.close()
-        return
-
-    # Pre-populate baseline EXPLAIN cache on main connection
-    for q in workload:
-        stats_cache.get_baseline_explain(q.sql)
-
-    # ── Phase 1: Baseline measurements (NO secondary index) ─────
-    needed_queries = [
-        q
-        for q in workload
-        if q.query_id not in baseline_timings
-        and any(
-            (q.query_id, c.index_name) not in completed_pairs
-            for c in candidates_by_query[q.query_id]
-        )
-    ]
-
-    if needed_queries:
-        print(
-            f"\nPhase 1/2: Measuring baseline (no-index) timings for "
-            f"{len(needed_queries)} queries ({runs} runs, {warmup} warm-up discarded, "
-            f"{workers} read workers)..."
-        )
-        t_phase1 = time.perf_counter()
-        done_b = 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            fut_to_q = {
-                pool.submit(_measure_single_query, q.sql, runs, warmup): q
-                for q in needed_queries
-            }
-            for fut in as_completed(fut_to_q):
-                q = fut_to_q[fut]
-                med_time, rows_bef, acc_bef, _ = fut.result()
-                baseline_timings[q.query_id] = (med_time, rows_bef, acc_bef)
-                done_b += 1
-                if done_b % 30 == 0 or done_b == len(needed_queries):
-                    elapsed = time.perf_counter() - t_phase1
-                    rate = done_b / max(elapsed, 1e-3)
-                    rem = (len(needed_queries) - done_b) / max(rate, 1e-6)
-                    print(
-                        f"  [Baseline {done_b:>3}/{len(needed_queries)}] "
-                        f"{q.query_id} ({q.template_id}) -> {med_time*1000:6.1f} ms, "
-                        f"rows={rows_bef:,} | elapsed={elapsed:.0f}s, ETA={rem:.0f}s",
-                        flush=True,
-                    )
-
-    # ── Phase 2: Candidate index measurements ───────────────────
-    index_groups: Dict[str, Tuple[CandidateIndex, List[str]]] = {}
-    for q in workload:
-        for cand in candidates_by_query[q.query_id]:
-            if (q.query_id, cand.index_name) in completed_pairs:
-                continue
-            if cand.index_name not in index_groups:
-                index_groups[cand.index_name] = (cand, [])
-            index_groups[cand.index_name][1].append(q.query_id)
-
-    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
-    f_out = csv_path.open("a", encoding="utf-8", newline="")
-    writer = csv.DictWriter(f_out, fieldnames=CSV_COLUMNS)
-    if write_header:
-        writer.writeheader()
-        f_out.flush()
-
-    print(
-        f"\nPhase 2/2: Measuring {total_pairs - len(completed_pairs)} pending "
-        f"(query, candidate) pairs across {len(index_groups)} distinct indexes..."
-    )
-    t_phase2 = time.perf_counter()
-    pairs_done_now = 0
-    pairs_to_do = total_pairs - len(completed_pairs)
+    total_queries = len(target_df)
+    t_start = time.perf_counter()
 
     try:
-        for g_idx, (idx_name, (cand, q_ids)) in enumerate(index_groups.items(), 1):
-            db.drop_all_secondary_indexes(config.BENCHMARK_TABLE)
-            t_ddl = time.perf_counter()
-            db.execute_ddl(cand.ddl)
-            db.analyze_table(cand.table)
-            ddl_s = time.perf_counter() - t_ddl
+        for q_idx, row in target_df.iterrows():
+            qid = str(row["query_id"])
+            if qid in completed_qids:
+                continue
 
+            db_name = str(row["database_name"])
+            tbl_name = str(row["table_name"])
+            sql = str(row["sql"])
+            split_group = str(row["split_group"])
+            category = str(row["category"])
+
+            db.use_database(db_name)
+            # Ensure clean state (no leftover secondary indexes on target table)
+            for leftover_idx in db.get_non_primary_indexes(tbl_name):
+                db.drop_index_if_exists(tbl_name, leftover_idx)
+
+            t_stats = stats_cache.get_table_stats(tbl_name)
+            parsed = parse_query(
+                sql,
+                target_table=t_stats.table_name,
+                schema_columns=t_stats.canonical_columns,
+            )
+            candidates = generate_candidates(
+                parsed,
+                max_candidates=4,
+                excluded_columns=t_stats.excluded_columns(),
+                single_pk_column=t_stats.single_pk_column(),
+            )
+            if not candidates:
+                continue
+
+            # Measure unindexed baseline (5 runs, discard 1 warm-up)
             try:
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    fut_to_qid = {
-                        pool.submit(
-                            _measure_single_query, query_map[qid].sql, runs, warmup, True
-                        ): qid
-                        for qid in q_ids
-                    }
-                    for fut in as_completed(fut_to_qid):
-                        qid = fut_to_qid[fut]
-                        q_inst = query_map[qid]
-                        parsed = parsed_map[qid]
-                        time_before, rows_before, acc_before = baseline_timings[qid]
-                        time_after, rows_after, acc_after, key_used = fut.result()
+                time_before, rows_before, _ = db.timed_execute(sql, runs=runs, warmup=1)
+                base_exp = stats_cache.get_baseline_explain(sql, t_stats.table_name)
+            except Exception as exc:
+                print(f"  [SKIP QUERY] {qid} failed baseline execution: {exc}")
+                continue
 
-                        speedup = time_before / max(time_after, 1e-6)
-                        log_speedup = math.log(max(speedup, 1e-3))
-                        feats = extract_features(parsed, cand, stats_cache)
+            for cand in candidates:
+                try:
+                    feats = extract_features(parsed, cand, stats_cache, baseline_explain=base_exp)
+                    # Create candidate index
+                    db.execute_ddl(cand.ddl)
+                    time_after, rows_after, _ = db.timed_execute(sql, runs=runs, warmup=1)
+                except Exception as exc:
+                    print(f"    [SKIP CAND] {cand.index_name}: {exc}")
+                    db.drop_index_if_exists(cand.table, cand.index_name)
+                    continue
+                finally:
+                    db.drop_index_if_exists(cand.table, cand.index_name)
 
-                        row_dict: Dict[str, Any] = {
-                            "query_id": q_inst.query_id,
-                            "template_id": q_inst.template_id,
-                            "template_desc": q_inst.template_desc,
-                            "split_group": q_inst.split_group,
-                            "sql": q_inst.sql,
-                            "template_sql": parsed.template_sql,
-                            "table_name": cand.table,
-                            "index_name": cand.index_name,
-                            "index_columns": ",".join(cand.columns),
-                            "ddl": cand.ddl,
-                            "source_clauses": "|".join(cand.source_clauses),
-                            "time_before_s": round(time_before, 6),
-                            "time_after_s": round(time_after, 6),
-                            "speedup": round(speedup, 4),
-                            "log_speedup": round(log_speedup, 6),
-                            "rows_before": rows_before,
-                            "rows_after": rows_after,
-                            "access_type_before": acc_before,
-                            "access_type_after": acc_after,
-                            "key_used_after": key_used,
-                        }
-                        row_dict.update(feats)
-                        writer.writerow(row_dict)
-                        f_out.flush()
-                        pairs_done_now += 1
+                speedup = max(0.05, time_before / max(time_after, 1e-6))
+                log_speedup = math.log(speedup)
 
-                elapsed = time.perf_counter() - t_phase2
+                rec: Dict[str, Any] = {
+                    "query_id": qid,
+                    "database_name": db_name,
+                    "table_name": t_stats.table_name,
+                    "category": category,
+                    "split_group": split_group,
+                    "template_id": f"{db_name}:{category}",
+                    "template_sql": parsed.template_sql,
+                    "sql": sql,
+                    "index_name": cand.index_name,
+                    "candidate_columns": cand.columns_display,
+                    "ddl": cand.ddl,
+                    "time_before_ms": round(time_before * 1000.0, 4),
+                    "time_after_ms": round(time_after * 1000.0, 4),
+                    "rows_before": int(rows_before),
+                    "rows_after": int(rows_after),
+                    "speedup": round(speedup, 4),
+                    "log_speedup": round(log_speedup, 4),
+                }
+                for fname in FEATURE_NAMES:
+                    rec[fname] = float(feats[fname])
+                existing_rows.append(rec)
+
+            completed_qids.add(qid)
+            if len(completed_qids) % 5 == 0 or len(completed_qids) == total_queries:
+                out_df = pd.DataFrame(existing_rows)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_df.to_csv(out_path, index=False)
+                elapsed = time.perf_counter() - t_start
                 print(
-                    f"  [Index {g_idx:>2}/{len(index_groups)}] `{idx_name}` "
-                    f"(DDL {ddl_s:.1f}s, {len(q_ids)} queries) -> "
-                    f"progress {pairs_done_now}/{pairs_to_do} ({elapsed:.0f}s elapsed)",
-                    flush=True,
+                    f"  [LABELING PROGRESS] {len(completed_qids)}/{total_queries} queries "
+                    f"({len(existing_rows)} pairs) | last={db_name}.{tbl_name} | elapsed={elapsed:.1f}s"
                 )
-            finally:
-                db.drop_index_if_exists(cand.table, cand.index_name)
-
-        db.analyze_table(config.BENCHMARK_TABLE)
     finally:
-        f_out.close()
-        db.drop_all_secondary_indexes(config.BENCHMARK_TABLE)
         db.close()
 
-    print(f"\nLabeling complete! Saved empirical dataset to {csv_path}")
+    final_df = pd.DataFrame(existing_rows)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    final_df.to_csv(out_path, index=False)
+    print(f"Finished labeling: {len(final_df)} pairs saved to {out_path}")
+    return final_df
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build empirical MySQL index speedup dataset")
-    parser.add_argument("--queries-per-template", type=int, default=15)
-    parser.add_argument("--max-candidates", type=int, default=4)
-    parser.add_argument("--runs", type=int, default=config.LABELING_RUNS)
-    parser.add_argument("--workers", type=int, default=3)
-    parser.add_argument("--output", type=str, default=config.LABEL_CSV)
-    args = parser.parse_args()
-    build_training_set(
-        output_csv=args.output,
-        queries_per_template=args.queries_per_template,
-        max_candidates_per_query=args.max_candidates,
-        runs=args.runs,
-        workers=args.workers,
-    )
+    label_workload()

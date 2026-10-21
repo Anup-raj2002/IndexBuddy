@@ -4,9 +4,8 @@ candidates/generator.py
 Generates single-column and two-column B-tree candidate indexes for a parsed SQL
 query, capped at ``max_candidates`` per query (default from config.py).
 
-Preserves the clean ``CREATE INDEX idx_<table>_<cols> ON <table> (<cols>)`` DDL
-format from the original IndexBuddy recommender while delegating all scoring to
-the downstream ML model.
+Zero hardcoded table or column names. Primary key and TEXT/BLOB columns are
+dynamically excluded via table introspection when available.
 """
 from __future__ import annotations
 
@@ -15,12 +14,6 @@ from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 import config
 from parsing.query_parser import ParsedQuery, parse_query
-
-
-# Default columns excluded from standard B-tree secondary index generation:
-# - 'order_id' is already the clustered PRIMARY KEY on orders_benchmark
-# - 'notes' is a TEXT column (MySQL InnoDB requires explicit key prefix length on TEXT/BLOB)
-DEFAULT_EXCLUDED_COLUMNS: Set[str] = {"order_id", "notes"}
 
 
 @dataclass(frozen=True)
@@ -47,16 +40,24 @@ class CandidateIndex:
 
 
 def build_index_name(table: str, columns: Sequence[str]) -> str:
-    """Return deterministic MySQL index name ``idx_<table>_<col1>[_<col2>]``."""
-    raw = f"idx_{table}_{'_'.join(columns)}"
-    return raw[:64]  # MySQL identifier limit is 64 chars
+    """Return deterministic MySQL index name ``idx_ib_<table>_<col1>[_<col2>]``."""
+    clean_tbl = "".join(ch if ch.isalnum() else "_" for ch in table)
+    clean_cols = "_".join("".join(ch if ch.isalnum() else "_" for ch in c) for c in columns)
+    raw = f"idx_ib_{clean_tbl}_{clean_cols}"
+    return raw[:64]
 
 
-def build_create_index_ddl(table: str, columns: Sequence[str], index_name: Optional[str] = None) -> str:
+def build_create_index_ddl(
+    table: str,
+    columns: Sequence[str],
+    index_name: Optional[str] = None,
+    invisible: bool = False,
+) -> str:
     """Return standard MySQL ``CREATE INDEX`` statement."""
     idx_name = index_name or build_index_name(table, columns)
     cols_sql = ", ".join(f"`{c}`" for c in columns)
-    return f"CREATE INDEX `{idx_name}` ON `{table}` ({cols_sql});"
+    vis = " INVISIBLE" if invisible else ""
+    return f"CREATE INDEX `{idx_name}` ON `{table}` ({cols_sql}){vis};"
 
 
 def _column_clause_tags(parsed: ParsedQuery, col: str) -> Tuple[str, ...]:
@@ -77,6 +78,7 @@ def generate_candidates(
     query_or_parsed: str | ParsedQuery,
     max_candidates: int = config.MAX_CANDIDATES_PER_QUERY,
     excluded_columns: Optional[Iterable[str]] = None,
+    single_pk_column: Optional[str] = None,
 ) -> List[CandidateIndex]:
     """Generate single-column and two-column candidate indexes for a SQL query.
 
@@ -87,23 +89,27 @@ def generate_candidates(
     max_candidates : int
         Maximum number of candidate indexes returned per query.
     excluded_columns : Optional[Iterable[str]]
-        Columns to skip (defaults to ``DEFAULT_EXCLUDED_COLUMNS``).
+        Columns that cannot be indexed directly without prefix lengths (e.g. TEXT/BLOB).
+    single_pk_column : Optional[str]
+        If the table has a single-column PRIMARY KEY, skip generating a redundant
+        1-column secondary index on that exact column alone.
     """
     parsed = (
         parse_query(query_or_parsed)
         if isinstance(query_or_parsed, str)
         else query_or_parsed
     )
-    excluded = (
+    excluded: Set[str] = (
         {c.lower() for c in excluded_columns}
         if excluded_columns is not None
-        else set(DEFAULT_EXCLUDED_COLUMNS)
+        else set()
     )
+    pk_low = single_pk_column.lower() if single_pk_column else None
     table = parsed.primary_table
 
-    # Collect candidate columns in clause priority order:
-    # 1) WHERE + JOIN columns, 2) GROUP BY columns, 3) ORDER BY columns
+    # Map lowercase column name -> canonical column name from parsed query
     ordered_cols: List[str] = []
+    seen_low: Set[str] = set()
     for col in (
         parsed.where_columns
         + parsed.join_columns
@@ -113,24 +119,27 @@ def generate_candidates(
         col_low = col.lower()
         if col_low in excluded:
             continue
-        # Skip leading-wildcard LIKE columns if they have no other role
         if (
-            parsed.predicate_types.get(col_low) == "like_wildcard"
-            and col_low not in parsed.join_columns
-            and col_low not in parsed.group_by_columns
-            and col_low not in parsed.order_by_columns
+            parsed.predicate_types.get(col) == "like_wildcard"
+            and col not in parsed.join_columns
+            and col not in parsed.group_by_columns
+            and col not in parsed.order_by_columns
         ):
             continue
-        if col_low not in ordered_cols:
-            ordered_cols.append(col_low)
+        if col_low not in seen_low:
+            seen_low.add(col_low)
+            ordered_cols.append(col)
 
     candidates: List[CandidateIndex] = []
     seen_tuples: Set[Tuple[str, ...]] = set()
 
     def _add_candidate(cols: Tuple[str, ...]) -> None:
-        if cols in seen_tuples or len(candidates) >= max_candidates:
+        key_low = tuple(c.lower() for c in cols)
+        if len(cols) == 1 and pk_low and key_low[0] == pk_low:
             return
-        seen_tuples.add(cols)
+        if key_low in seen_tuples or len(candidates) >= max_candidates:
+            return
+        seen_tuples.add(key_low)
         idx_name = build_index_name(table, cols)
         ddl = build_create_index_ddl(table, cols, idx_name)
         tags: List[str] = []
@@ -148,14 +157,11 @@ def generate_candidates(
             )
         )
 
-    # 1. All single-column candidates
+    # 1. Single-column candidates
     for col in ordered_cols:
         _add_candidate((col,))
 
     # 2. Two-column composite candidates
-    # Prioritize equality / IN / JOIN columns in leading position (col1),
-    # followed by remaining referenced columns in second position (col2),
-    # then include remaining ordered pairs up to max_candidates.
     leading_preferred = [
         c
         for c in ordered_cols
@@ -166,45 +172,7 @@ def generate_candidates(
 
     for col1 in leading_preferred + other_cols:
         for col2 in ordered_cols:
-            if col1 != col2:
+            if col1.lower() != col2.lower():
                 _add_candidate((col1, col2))
 
     return candidates[:max_candidates]
-
-
-if __name__ == "__main__":
-    sample_queries = [
-        (
-            "SELECT * FROM orders_benchmark "
-            "WHERE customer_id = 48219 AND status = 'completed' "
-            "ORDER BY order_date DESC LIMIT 25"
-        ),
-        (
-            "SELECT o.order_id, o.amount, c.name "
-            "FROM orders_benchmark o "
-            "JOIN customers_benchmark c ON o.customer_id = c.customer_id "
-            "WHERE o.product_id IN (101, 202, 303) "
-            "AND o.order_date BETWEEN '2023-01-01' AND '2023-06-30'"
-        ),
-        (
-            "SELECT region, payment_method, SUM(amount) "
-            "FROM orders_benchmark "
-            "WHERE payment_method LIKE 'credit%' "
-            "GROUP BY region, payment_method"
-        ),
-    ]
-    for idx, q in enumerate(sample_queries, 1):
-        p = parse_query(q)
-        cands = generate_candidates(p)
-        print(f"\n=== Sample Query {idx} ===")
-        print(f"SQL          : {p.raw_sql}")
-        print(f"Template     : {p.template_sql}")
-        print(f"Primary table: {p.primary_table}")
-        print(f"WHERE cols   : {p.where_columns}")
-        print(f"JOIN cols    : {p.join_columns}")
-        print(f"GROUP BY cols: {p.group_by_columns}")
-        print(f"ORDER BY cols: {p.order_by_columns}")
-        print(f"Predicates   : {p.predicate_types}")
-        print(f"Candidates ({len(cands)}):")
-        for c in cands:
-            print(f"  - ({c.columns_display:<26}) | clauses={list(c.source_clauses)} | {c.ddl}")

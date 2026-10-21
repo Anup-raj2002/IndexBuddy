@@ -1,0 +1,1534 @@
+{
+  "financial": {
+    "foreign_keys": [
+      {
+        "table_name": "account",
+        "constraint_name": "account_ibfk_1",
+        "column_name": "district_id",
+        "ref_table_name": "district",
+        "ref_column_name": "district_id"
+      },
+      {
+        "table_name": "card",
+        "constraint_name": "card_ibfk_1",
+        "column_name": "disp_id",
+        "ref_table_name": "disp",
+        "ref_column_name": "disp_id"
+      },
+      {
+        "table_name": "client",
+        "constraint_name": "client_ibfk_1",
+        "column_name": "district_id",
+        "ref_table_name": "district",
+        "ref_column_name": "district_id"
+      },
+      {
+        "table_name": "disp",
+        "constraint_name": "disp_ibfk_1",
+        "column_name": "account_id",
+        "ref_table_name": "account",
+        "ref_column_name": "account_id"
+      },
+      {
+        "table_name": "disp",
+        "constraint_name": "disp_ibfk_2",
+        "column_name": "client_id",
+        "ref_table_name": "client",
+        "ref_column_name": "client_id"
+      },
+      {
+        "table_name": "loan",
+        "constraint_name": "loan_ibfk_1",
+        "column_name": "account_id",
+        "ref_table_name": "account",
+        "ref_column_name": "account_id"
+      },
+      {
+        "table_name": "order",
+        "constraint_name": "order_ibfk_1",
+        "column_name": "account_id",
+        "ref_table_name": "account",
+        "ref_column_name": "account_id"
+      },
+      {
+        "table_name": "trans",
+        "constraint_name": "trans_ibfk_1",
+        "column_name": "account_id",
+        "ref_table_name": "account",
+        "ref_column_name": "account_id"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "account",
+        "index_name": "district_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "district_id"
+        ]
+      },
+      {
+        "table_name": "card",
+        "index_name": "disp_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "disp_id"
+        ]
+      },
+      {
+        "table_name": "client",
+        "index_name": "district_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "district_id"
+        ]
+      },
+      {
+        "table_name": "disp",
+        "index_name": "account_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "account_id"
+        ]
+      },
+      {
+        "table_name": "disp",
+        "index_name": "client_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "client_id"
+        ]
+      },
+      {
+        "table_name": "loan",
+        "index_name": "account_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "account_id"
+        ]
+      },
+      {
+        "table_name": "order",
+        "index_name": "account_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "account_id"
+        ]
+      },
+      {
+        "table_name": "trans",
+        "index_name": "account_id",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "account_id"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "account",
+      "card",
+      "client",
+      "disp",
+      "district",
+      "loan",
+      "order",
+      "trans"
+    ]
+  },
+  "ErgastF1": {
+    "foreign_keys": [
+      {
+        "table_name": "constructorresults",
+        "constraint_name": "constructorResults_ibfk_1",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "constructorresults",
+        "constraint_name": "constructorResults_ibfk_2",
+        "column_name": "constructorId",
+        "ref_table_name": "constructors",
+        "ref_column_name": "constructorId"
+      },
+      {
+        "table_name": "constructorstandings",
+        "constraint_name": "constructorStandings_ibfk_1",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "constructorstandings",
+        "constraint_name": "constructorStandings_ibfk_2",
+        "column_name": "constructorId",
+        "ref_table_name": "constructors",
+        "ref_column_name": "constructorId"
+      },
+      {
+        "table_name": "driverstandings",
+        "constraint_name": "driverStandings_ibfk_1",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "driverstandings",
+        "constraint_name": "driverStandings_ibfk_2",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      },
+      {
+        "table_name": "laptimes",
+        "constraint_name": "lapTimes_ibfk_1",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      },
+      {
+        "table_name": "laptimes",
+        "constraint_name": "lapTimes_ibfk_2",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "pitstops",
+        "constraint_name": "pitStops_ibfk_1",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "pitstops",
+        "constraint_name": "pitStops_ibfk_2",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      },
+      {
+        "table_name": "qualifying",
+        "constraint_name": "qualifying_ibfk_1",
+        "column_name": "constructorId",
+        "ref_table_name": "constructors",
+        "ref_column_name": "constructorId"
+      },
+      {
+        "table_name": "qualifying",
+        "constraint_name": "qualifying_ibfk_2",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      },
+      {
+        "table_name": "qualifying",
+        "constraint_name": "qualifying_ibfk_3",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "races",
+        "constraint_name": "races_ibfk_1",
+        "column_name": "circuitId",
+        "ref_table_name": "circuits",
+        "ref_column_name": "circuitId"
+      },
+      {
+        "table_name": "races",
+        "constraint_name": "races_ibfk_2",
+        "column_name": "year",
+        "ref_table_name": "seasons",
+        "ref_column_name": "year"
+      },
+      {
+        "table_name": "results",
+        "constraint_name": "results_ibfk_1",
+        "column_name": "constructorId",
+        "ref_table_name": "constructors",
+        "ref_column_name": "constructorId"
+      },
+      {
+        "table_name": "results",
+        "constraint_name": "results_ibfk_2",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      },
+      {
+        "table_name": "results",
+        "constraint_name": "results_ibfk_3",
+        "column_name": "statusId",
+        "ref_table_name": "status",
+        "ref_column_name": "statusId"
+      },
+      {
+        "table_name": "results",
+        "constraint_name": "results_ibfk_4",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "target",
+        "constraint_name": "target_ibfk_1",
+        "column_name": "raceId",
+        "ref_table_name": "races",
+        "ref_column_name": "raceId"
+      },
+      {
+        "table_name": "target",
+        "constraint_name": "target_ibfk_2",
+        "column_name": "driverId",
+        "ref_table_name": "drivers",
+        "ref_column_name": "driverId"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "circuits",
+        "index_name": "url",
+        "non_unique": 0,
+        "index_type": "BTREE",
+        "columns": [
+          "url"
+        ]
+      },
+      {
+        "table_name": "constructorresults",
+        "index_name": "constructorId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "constructorId"
+        ]
+      },
+      {
+        "table_name": "constructorresults",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "constructors",
+        "index_name": "name",
+        "non_unique": 0,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "constructorstandings",
+        "index_name": "constructorId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "constructorId"
+        ]
+      },
+      {
+        "table_name": "constructorstandings",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "drivers",
+        "index_name": "url",
+        "non_unique": 0,
+        "index_type": "BTREE",
+        "columns": [
+          "url"
+        ]
+      },
+      {
+        "table_name": "driverstandings",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "driverstandings",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "laptimes",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "laptimes",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "pitstops",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "pitstops",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "qualifying",
+        "index_name": "constructorId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "constructorId"
+        ]
+      },
+      {
+        "table_name": "qualifying",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "qualifying",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "races",
+        "index_name": "circuitId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "circuitId"
+        ]
+      },
+      {
+        "table_name": "races",
+        "index_name": "url",
+        "non_unique": 0,
+        "index_type": "BTREE",
+        "columns": [
+          "url"
+        ]
+      },
+      {
+        "table_name": "races",
+        "index_name": "year",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "year"
+        ]
+      },
+      {
+        "table_name": "results",
+        "index_name": "constructorId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "constructorId"
+        ]
+      },
+      {
+        "table_name": "results",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "results",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      },
+      {
+        "table_name": "results",
+        "index_name": "statusId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "statusId"
+        ]
+      },
+      {
+        "table_name": "seasons",
+        "index_name": "url",
+        "non_unique": 0,
+        "index_type": "BTREE",
+        "columns": [
+          "url"
+        ]
+      },
+      {
+        "table_name": "target",
+        "index_name": "driverId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "driverId"
+        ]
+      },
+      {
+        "table_name": "target",
+        "index_name": "raceId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "raceId"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "circuits",
+      "constructorresults",
+      "constructors",
+      "constructorstandings",
+      "drivers",
+      "driverstandings",
+      "laptimes",
+      "pitstops",
+      "qualifying",
+      "races",
+      "results",
+      "seasons",
+      "status",
+      "target"
+    ]
+  },
+  "stats_CEB": {
+    "foreign_keys": [
+      {
+        "table_name": "badges",
+        "constraint_name": "badges_ibfk_1",
+        "column_name": "UserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "comments",
+        "constraint_name": "comments_ibfk_1",
+        "column_name": "PostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "comments",
+        "constraint_name": "comments_ibfk_2",
+        "column_name": "UserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "posthistory",
+        "constraint_name": "postHistory_ibfk_1",
+        "column_name": "PostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "posthistory",
+        "constraint_name": "postHistory_ibfk_2",
+        "column_name": "UserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "postlinks",
+        "constraint_name": "postLinks_ibfk_1",
+        "column_name": "PostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "postlinks",
+        "constraint_name": "postLinks_ibfk_2",
+        "column_name": "RelatedPostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "posts",
+        "constraint_name": "posts_ibfk_1",
+        "column_name": "LastEditorUserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "posts",
+        "constraint_name": "posts_ibfk_2",
+        "column_name": "OwnerUserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "tags",
+        "constraint_name": "tags_ibfk_1",
+        "column_name": "ExcerptPostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "votes",
+        "constraint_name": "votes_ibfk_1",
+        "column_name": "PostId",
+        "ref_table_name": "posts",
+        "ref_column_name": "Id"
+      },
+      {
+        "table_name": "votes",
+        "constraint_name": "votes_ibfk_2",
+        "column_name": "UserId",
+        "ref_table_name": "users",
+        "ref_column_name": "Id"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "badges",
+        "index_name": "UserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "UserId"
+        ]
+      },
+      {
+        "table_name": "comments",
+        "index_name": "PostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "PostId"
+        ]
+      },
+      {
+        "table_name": "comments",
+        "index_name": "UserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "UserId"
+        ]
+      },
+      {
+        "table_name": "posthistory",
+        "index_name": "PostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "PostId"
+        ]
+      },
+      {
+        "table_name": "posthistory",
+        "index_name": "UserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "UserId"
+        ]
+      },
+      {
+        "table_name": "postlinks",
+        "index_name": "PostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "PostId"
+        ]
+      },
+      {
+        "table_name": "postlinks",
+        "index_name": "RelatedPostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "RelatedPostId"
+        ]
+      },
+      {
+        "table_name": "posts",
+        "index_name": "LastEditorUserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "LastEditorUserId"
+        ]
+      },
+      {
+        "table_name": "posts",
+        "index_name": "OwnerUserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "OwnerUserId"
+        ]
+      },
+      {
+        "table_name": "tags",
+        "index_name": "ExcerptPostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "ExcerptPostId"
+        ]
+      },
+      {
+        "table_name": "votes",
+        "index_name": "PostId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "PostId"
+        ]
+      },
+      {
+        "table_name": "votes",
+        "index_name": "UserId",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "UserId"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "badges",
+      "comments",
+      "posthistory",
+      "postlinks",
+      "posts",
+      "tags",
+      "users",
+      "votes"
+    ]
+  },
+  "imdb_full": {
+    "foreign_keys": [
+      {
+        "table_name": "business",
+        "constraint_name": "business_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "countries",
+        "constraint_name": "countries_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "distributors",
+        "constraint_name": "distributors_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "genres",
+        "constraint_name": "genres_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "language",
+        "constraint_name": "language_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2actors",
+        "constraint_name": "movies2actors_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2actors",
+        "constraint_name": "movies2actors_ibfk_2",
+        "column_name": "actorid",
+        "ref_table_name": "actors",
+        "ref_column_name": "actorid"
+      },
+      {
+        "table_name": "movies2directors",
+        "constraint_name": "movies2directors_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2directors",
+        "constraint_name": "movies2directors_ibfk_2",
+        "column_name": "directorid",
+        "ref_table_name": "directors",
+        "ref_column_name": "directorid"
+      },
+      {
+        "table_name": "movies2editors",
+        "constraint_name": "movies2editors_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2editors",
+        "constraint_name": "movies2editors_ibfk_2",
+        "column_name": "editorid",
+        "ref_table_name": "editors",
+        "ref_column_name": "editorid"
+      },
+      {
+        "table_name": "movies2producers",
+        "constraint_name": "movies2producers_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2producers",
+        "constraint_name": "movies2producers_ibfk_2",
+        "column_name": "producerid",
+        "ref_table_name": "producers",
+        "ref_column_name": "producerid"
+      },
+      {
+        "table_name": "movies2writers",
+        "constraint_name": "movies2writers_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "movies2writers",
+        "constraint_name": "movies2writers_ibfk_2",
+        "column_name": "writerid",
+        "ref_table_name": "writers",
+        "ref_column_name": "writerid"
+      },
+      {
+        "table_name": "prodcompanies",
+        "constraint_name": "prodcompanies_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "ratings",
+        "constraint_name": "ratings_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      },
+      {
+        "table_name": "runningtimes",
+        "constraint_name": "runningtimes_ibfk_1",
+        "column_name": "movieid",
+        "ref_table_name": "movies",
+        "ref_column_name": "movieid"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "actors",
+        "index_name": "actors_name_fulltext",
+        "non_unique": 1,
+        "index_type": "FULLTEXT",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "actors",
+        "index_name": "name",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "editors",
+        "index_name": "name",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "genres",
+        "index_name": "genre",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "genre"
+        ]
+      },
+      {
+        "table_name": "genres",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "language",
+        "index_name": "index1",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies",
+        "index_name": "movies_title_fulltext",
+        "non_unique": 1,
+        "index_type": "FULLTEXT",
+        "columns": [
+          "title"
+        ]
+      },
+      {
+        "table_name": "movies",
+        "index_name": "title",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "title"
+        ]
+      },
+      {
+        "table_name": "movies2actors",
+        "index_name": "a",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "actorid"
+        ]
+      },
+      {
+        "table_name": "movies2actors",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies2directors",
+        "index_name": "directorid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "directorid"
+        ]
+      },
+      {
+        "table_name": "movies2directors",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies2editors",
+        "index_name": "editorid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "editorid"
+        ]
+      },
+      {
+        "table_name": "movies2editors",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies2producers",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies2producers",
+        "index_name": "producerid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "producerid"
+        ]
+      },
+      {
+        "table_name": "movies2writers",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "movies2writers",
+        "index_name": "writerid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "writerid"
+        ]
+      },
+      {
+        "table_name": "prodcompanies",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "prodcompanies",
+        "index_name": "name",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "producers",
+        "index_name": "name",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "producers",
+        "index_name": "producers_name_fulltext",
+        "non_unique": 1,
+        "index_type": "FULLTEXT",
+        "columns": [
+          "name"
+        ]
+      },
+      {
+        "table_name": "runningtimes",
+        "index_name": "movieid",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "movieid"
+        ]
+      },
+      {
+        "table_name": "writers",
+        "index_name": "name",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "name"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "actors",
+      "business",
+      "countries",
+      "directors",
+      "distributors",
+      "editors",
+      "genres",
+      "language",
+      "movies",
+      "movies2actors",
+      "movies2directors",
+      "movies2editors",
+      "movies2producers",
+      "movies2writers",
+      "prodcompanies",
+      "producers",
+      "ratings",
+      "runningtimes",
+      "writers"
+    ]
+  },
+  "Walmart_2014": {
+    "foreign_keys": [
+      {
+        "table_name": "features",
+        "constraint_name": "features_ibfk_1",
+        "column_name": "Store",
+        "ref_table_name": "stores",
+        "ref_column_name": "Store"
+      },
+      {
+        "table_name": "train",
+        "constraint_name": "train_ibfk_1",
+        "column_name": "Store",
+        "ref_table_name": "stores",
+        "ref_column_name": "Store"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "features",
+        "index_name": "Store",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "Store"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "features",
+      "stores",
+      "train"
+    ]
+  },
+  "geneea": {
+    "foreign_keys": [
+      {
+        "table_name": "bod_schuze",
+        "constraint_name": "bod_schuze_ibfk_1",
+        "column_name": "id_schuze",
+        "ref_table_name": "schuze",
+        "ref_column_name": "id_schuze"
+      },
+      {
+        "table_name": "bod_schuze",
+        "constraint_name": "bod_schuze_ibfk_2",
+        "column_name": "id_bod_stav",
+        "ref_table_name": "bod_stav",
+        "ref_column_name": "id_bod_stav"
+      },
+      {
+        "table_name": "funkce",
+        "constraint_name": "funkce_ibfk_1",
+        "column_name": "id_organ",
+        "ref_table_name": "organy",
+        "ref_column_name": "id_organ"
+      },
+      {
+        "table_name": "funkce",
+        "constraint_name": "funkce_ibfk_2",
+        "column_name": "id_typ_funkce",
+        "ref_table_name": "typ_funkce",
+        "ref_column_name": "id_typ_funkce"
+      },
+      {
+        "table_name": "hl_check",
+        "constraint_name": "hl_check_ibfk_1",
+        "column_name": "id_hlasovani",
+        "ref_table_name": "hl_hlasovani",
+        "ref_column_name": "id_hlasovani"
+      },
+      {
+        "table_name": "hl_hlasovani",
+        "constraint_name": "hl_hlasovani_ibfk_1",
+        "column_name": "id_organ",
+        "ref_table_name": "organy",
+        "ref_column_name": "id_organ"
+      },
+      {
+        "table_name": "hl_poslanec",
+        "constraint_name": "hl_poslanec_ibfk_1",
+        "column_name": "id_poslanec",
+        "ref_table_name": "poslanec",
+        "ref_column_name": "id_poslanec"
+      },
+      {
+        "table_name": "hl_vazby",
+        "constraint_name": "hl_vazby_ibfk_1",
+        "column_name": "id_hlasovani",
+        "ref_table_name": "hl_hlasovani",
+        "ref_column_name": "id_hlasovani"
+      },
+      {
+        "table_name": "hl_zposlanec",
+        "constraint_name": "hl_zposlanec_ibfk_1",
+        "column_name": "id_hlasovani",
+        "ref_table_name": "hl_hlasovani",
+        "ref_column_name": "id_hlasovani"
+      },
+      {
+        "table_name": "hl_zposlanec",
+        "constraint_name": "hl_zposlanec_ibfk_2",
+        "column_name": "id_osoba",
+        "ref_table_name": "osoby",
+        "ref_column_name": "id_osoba"
+      },
+      {
+        "table_name": "omluvy",
+        "constraint_name": "omluvy_ibfk_1",
+        "column_name": "id_organ",
+        "ref_table_name": "organy",
+        "ref_column_name": "id_organ"
+      },
+      {
+        "table_name": "omluvy",
+        "constraint_name": "omluvy_ibfk_2",
+        "column_name": "id_poslanec",
+        "ref_table_name": "poslanec",
+        "ref_column_name": "id_poslanec"
+      },
+      {
+        "table_name": "organy",
+        "constraint_name": "organy_ibfk_1",
+        "column_name": "id_typ_organu",
+        "ref_table_name": "typ_organu",
+        "ref_column_name": "id_typ_org"
+      },
+      {
+        "table_name": "pkgps",
+        "constraint_name": "pkgps_ibfk_1",
+        "column_name": "id_poslanec",
+        "ref_table_name": "poslanec",
+        "ref_column_name": "id_poslanec"
+      },
+      {
+        "table_name": "poslanec",
+        "constraint_name": "poslanec_ibfk_1",
+        "column_name": "id_osoba",
+        "ref_table_name": "osoby",
+        "ref_column_name": "id_osoba"
+      },
+      {
+        "table_name": "schuze",
+        "constraint_name": "schuze_ibfk_1",
+        "column_name": "id_organ",
+        "ref_table_name": "organy",
+        "ref_column_name": "id_organ"
+      },
+      {
+        "table_name": "schuze_stav",
+        "constraint_name": "schuze_stav_ibfk_1",
+        "column_name": "id_schuze",
+        "ref_table_name": "schuze",
+        "ref_column_name": "id_schuze"
+      },
+      {
+        "table_name": "typ_funkce",
+        "constraint_name": "typ_funkce_ibfk_1",
+        "column_name": "id_typ_org",
+        "ref_table_name": "typ_organu",
+        "ref_column_name": "id_typ_org"
+      },
+      {
+        "table_name": "zarazeni",
+        "constraint_name": "zarazeni_ibfk_1",
+        "column_name": "id_osoba",
+        "ref_table_name": "osoby",
+        "ref_column_name": "id_osoba"
+      },
+      {
+        "table_name": "zmatecne",
+        "constraint_name": "zmatecne_ibfk_1",
+        "column_name": "id_hlasovani",
+        "ref_table_name": "hl_hlasovani",
+        "ref_column_name": "id_hlasovani"
+      }
+    ],
+    "secondary_indexes": [
+      {
+        "table_name": "bod_schuze",
+        "index_name": "bod_schuze_id_bod",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_bod"
+        ]
+      },
+      {
+        "table_name": "bod_schuze",
+        "index_name": "bod_schuze_id_bod_stav",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_bod_stav"
+        ]
+      },
+      {
+        "table_name": "bod_schuze",
+        "index_name": "bod_schuze_id_schuze",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_schuze"
+        ]
+      },
+      {
+        "table_name": "funkce",
+        "index_name": "funkce_id_organ",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_organ"
+        ]
+      },
+      {
+        "table_name": "funkce",
+        "index_name": "funkce_id_typ_funkce",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_typ_funkce"
+        ]
+      },
+      {
+        "table_name": "hl_check",
+        "index_name": "hl_check_id_hlasovani",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_hlasovani"
+        ]
+      },
+      {
+        "table_name": "hl_hlasovani",
+        "index_name": "hl_hlasovani_id_organ",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_organ"
+        ]
+      },
+      {
+        "table_name": "hl_poslanec",
+        "index_name": "hl_poslanec_id_poslanec",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_poslanec"
+        ]
+      },
+      {
+        "table_name": "hl_vazby",
+        "index_name": "hl_vazby_id_hlasovani",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_hlasovani"
+        ]
+      },
+      {
+        "table_name": "hl_zposlanec",
+        "index_name": "hl_zposlanec_id_hlasovani",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_hlasovani"
+        ]
+      },
+      {
+        "table_name": "hl_zposlanec",
+        "index_name": "hl_zposlanec_id_osoba",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_osoba"
+        ]
+      },
+      {
+        "table_name": "omluvy",
+        "index_name": "omluvy_id_organ",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_organ"
+        ]
+      },
+      {
+        "table_name": "omluvy",
+        "index_name": "omluvy_id_poslanec",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_poslanec"
+        ]
+      },
+      {
+        "table_name": "organy",
+        "index_name": "organy_id_typ_organu",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_typ_organu"
+        ]
+      },
+      {
+        "table_name": "organy",
+        "index_name": "organy_organ_id_organ",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "organ_id_organ"
+        ]
+      },
+      {
+        "table_name": "pkgps",
+        "index_name": "pkgps_id_poslanec",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_poslanec"
+        ]
+      },
+      {
+        "table_name": "poslanec",
+        "index_name": "poslanec_id_osoba",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_osoba"
+        ]
+      },
+      {
+        "table_name": "schuze",
+        "index_name": "schuze_id_organ",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_organ"
+        ]
+      },
+      {
+        "table_name": "schuze_stav",
+        "index_name": "schuze_stav_id_schuze",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_schuze"
+        ]
+      },
+      {
+        "table_name": "typ_funkce",
+        "index_name": "typ_funkce_id_typ_org",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_typ_org"
+        ]
+      },
+      {
+        "table_name": "typ_organu",
+        "index_name": "typ_organu_typ_id_typ_org",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "typ_id_typ_org"
+        ]
+      },
+      {
+        "table_name": "zarazeni",
+        "index_name": "zarazeni_id_osoba",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_osoba"
+        ]
+      },
+      {
+        "table_name": "zmatecne",
+        "index_name": "zmatecne_id_hlasovani",
+        "non_unique": 1,
+        "index_type": "BTREE",
+        "columns": [
+          "id_hlasovani"
+        ]
+      }
+    ],
+    "tables_analyzed": [
+      "bod_schuze",
+      "bod_stav",
+      "funkce",
+      "hl_check",
+      "hl_hlasovani",
+      "hl_poslanec",
+      "hl_vazby",
+      "hl_zposlanec",
+      "omluvy",
+      "organy",
+      "osoby",
+      "pkgps",
+      "poslanec",
+      "schuze",
+      "schuze_stav",
+      "typ_funkce",
+      "typ_organu",
+      "zarazeni",
+      "zmatecne"
+    ]
+  }
+}

@@ -390,17 +390,43 @@ export default function App() {
                     Step 1: Live `orders_benchmark` Schema, Cardinality &amp; Skew
                   </h2>
                   <p className="panel-subtitle">
-                    Queried live from MySQL `information_schema.COLUMNS` and
-                    `COUNT(DISTINCT)`. Deliberately created with ZERO secondary
-                    indexes.
+                    Connected live to your local MySQL database{" "}
+                    <strong>`indexbuddy`</strong> &rarr; table{" "}
+                    <strong>`orders_benchmark` (1,000,000 rows)</strong>.
                   </p>
                 </div>
                 <button
                   className="btn btn-primary"
                   onClick={() => setStep(2)}
                 >
-                  Next: Step 2 (Run Query Without Index) &rarr;
+                  Next: Step 2 (Run a Slow Query) &rarr;
                 </button>
+              </div>
+
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>What are you looking at in Step 1?</strong>
+                <div style={{ marginTop: 4 }}>
+                  We created a database called <code>indexbuddy</code> in your
+                  local MySQL server with a table named{" "}
+                  <code>orders_benchmark</code> containing{" "}
+                  <strong>1,000,000 e-commerce orders</strong> and{" "}
+                  <strong>NO indexes</strong> (except the primary key{" "}
+                  <code>order_id</code>).
+                  <br />
+                  &bull; <strong>Cardinality</strong> (below left) means{" "}
+                  <em>"how many unique values exist in this column"</em>:{" "}
+                  <code>customer_id</code> has <strong>99,994</strong> unique
+                  customers (great for indexing!), whereas <code>status</code>{" "}
+                  only has <strong>5</strong> unique values (bad for indexing if
+                  filtering on <code>'completed'</code>!).
+                </div>
               </div>
 
               {schemaData && (
@@ -584,6 +610,26 @@ export default function App() {
                     ? "Running 10 Executions on MySQL..."
                     : "Run Query With NO Index (10 Runs, 1 Warm-Up)"}
                 </button>
+              </div>
+
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>In Simple Words — What happens in Step 2?</strong>
+                <div style={{ marginTop: 4 }}>
+                  Right now, our table of <strong>1,000,000 orders</strong> has{" "}
+                  <strong>no index</strong>. When you click{" "}
+                  <strong>"Run Query With NO Index"</strong>, MySQL has to check
+                  every single row from row #1 to row #1,000,000 (like flipping
+                  through every page of a 1,000-page book because there is no
+                  index at the back). You will see it takes almost{" "}
+                  <strong>1 full second (~900 ms)</strong>.
+                </div>
               </div>
 
               <label
@@ -833,6 +879,26 @@ export default function App() {
                 {sqlText}
               </pre>
 
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>In Simple Words — What happens in Step 3?</strong>
+                <div style={{ marginTop: 4 }}>
+                  Instead of guessing which column to index, our{" "}
+                  <strong>Machine Learning model (XGBoost)</strong> looks at all
+                  possible indexes for your query and predicts{" "}
+                  <strong>how many times faster</strong> each one will be. If the
+                  best index makes the query at least <strong>1.5x faster</strong>
+                  , it recommends creating it; otherwise it says{" "}
+                  <strong>"No Index Needed"</strong>.
+                </div>
+              </div>
+
               {step3Result && (
                 <>
                   <div
@@ -1022,6 +1088,24 @@ export default function App() {
                 </div>
               </div>
 
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>In Simple Words — What happens in Step 4?</strong>
+                <div style={{ marginTop: 4 }}>
+                  The AI wrote the SQL command (<code>CREATE INDEX ...</code>) to
+                  add the winning index to your MySQL table. For safety, it waits
+                  for your permission—when you click{" "}
+                  <strong>"Confirm &amp; Execute CREATE INDEX"</strong>, MySQL
+                  actually builds the index on the 1,000,000 rows (~4 seconds).
+                </div>
+              </div>
+
               {!step3Result ? (
                 <div className="alert alert-warning">
                   Please complete Step 3 first to generate a candidate
@@ -1169,6 +1253,26 @@ export default function App() {
                 {sqlText}
               </pre>
 
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>In Simple Words — What happens in Step 3?</strong>
+                <div style={{ marginTop: 4 }}>
+                  Instead of guessing which column to index, our{" "}
+                  <strong>Machine Learning model (XGBoost)</strong> looks at all
+                  possible indexes for your query and predicts{" "}
+                  <strong>how many times faster</strong> each one will be. If the
+                  best index makes the query at least <strong>1.5x faster</strong>
+                  , it recommends creating it; otherwise it says{" "}
+                  <strong>"No Index Needed"</strong>.
+                </div>
+              </div>
+
               {step5Result && (
                 <>
                   <div className="kpi-grid">
@@ -1280,6 +1384,24 @@ export default function App() {
                 >
                   Reset Demo (Drop Created Index)
                 </button>
+              </div>
+
+              <div
+                className="alert"
+                style={{
+                  background: "rgba(59, 130, 246, 0.12)",
+                  border: "1px solid rgba(59, 130, 246, 0.4)",
+                  color: "#dbeafe",
+                }}
+              >
+                <strong>In Simple Words — What happens in Step 6?</strong>
+                <div style={{ marginTop: 4 }}>
+                  This final screen proves our AI model was right! It compares{" "}
+                  <strong>how fast the query was BEFORE the index (~900 ms)</strong>{" "}
+                  vs. <strong>AFTER the index (~0.8 ms)</strong>, and compares{" "}
+                  <strong>what the AI predicted</strong> against{" "}
+                  <strong>what actually happened in MySQL</strong>.
+                </div>
               </div>
 
               {!step6Result ? (

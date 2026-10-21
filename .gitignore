@@ -16,7 +16,8 @@ build/
 *.swp
 *.swo
 
-# Data artifacts
+# Data artifacts & raw dumps
+data/raw/
 *.joblib
 *.csv
 *.pkl

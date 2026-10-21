@@ -1,13 +1,36 @@
 # IndexBuddy — ML-Based Automatic MySQL Index Recommender
 
-IndexBuddy is an end-to-end **Machine Learning MySQL 8.x Index Advisor** with a closed-loop **React + Vite** (and **Streamlit**) live demonstration dashboard.
+IndexBuddy is a schema-agnostic, end-to-end **Machine Learning MySQL 8.x Index Advisor** with a step-by-step **Streamlit** live demonstration dashboard (`app/dashboard.py`). It works on **any table in any MySQL database with zero code changes**.
 
-Given a SQL query against a live MySQL 8.x database, IndexBuddy:
+Given a SQL `SELECT` query against a live MySQL 8.0.18+ database, IndexBuddy:
 1. Parses the SQL AST using **`sqlglot` (`dialect="mysql"`)** to extract tables, aliases, `WHERE`/`JOIN`/`GROUP BY`/`ORDER BY` columns, and predicate types (`equality`, `range`, `in`, `like_prefix`).
-2. Generates single-column and two-column composite B-tree candidate indexes (`CREATE INDEX ...`), including both column orderings `(col1, col2)` and `(col2, col1)`.
-3. Extracts **53 live database & optimizer features** per `(query, candidate)` pair (`information_schema` & `COUNT(DISTINCT)` cardinalities, null fraction, byte width, skewed MCV frequency distributions, B-tree left-prefix effective selectivity, estimated index size in MB, and baseline MySQL `EXPLAIN` plan features).
+2. Generates single-column and two-column composite B-tree candidate indexes (`CREATE INDEX ...`), including both column orderings `(col1, col2)` and `(col2, col1)` with a configurable cap per query.
+3. Extracts **schema-agnostic live database & optimizer features** per `(query, candidate)` pair (`information_schema` & sampled `COUNT(DISTINCT)` cardinalities, null fraction, data type category, byte width, skewed MCV frequency distributions, B-tree left-prefix effective selectivity, estimated index size in MB, and baseline MySQL `EXPLAIN` plan features). The model never sees table or column names.
 4. Uses a trained **XGBoost Regressor (`models/xgb_speedup.joblib`)** to predict $\log(\text{speedup}) = \log(t_{\text{before}} / t_{\text{after}})$ and recommends the top candidate **if and only if** its predicted speedup meets the configurable threshold (default `1.50x`), otherwise recommending **No Index**.
-5. Executes `CREATE INDEX` on the live MySQL server **only after explicit user confirmation**, re-runs the query over 10 executions (discarding warm-up), and compares **Predicted vs. Actual Speedup** with `EXPLAIN`, `EXPLAIN ANALYZE`, visual bar charts, and a plain-English diagnostic explanation.
+5. Executes `CREATE INDEX` on the live MySQL server **only after explicit user confirmation**, re-runs the query over 10 executions (discarding 1 warm-up), and compares **Predicted vs. Actual Speedup** with `EXPLAIN`, `EXPLAIN ANALYZE`, visual bar charts, and a plain-English diagnostic explanation generated from the live measurements.
+
+---
+
+## Real Data Sources & Citation
+
+All training and evaluation data come from **real-world relational databases** hosted on the **CTU Prague Relational Learning Repository**:
+
+> **Citation:**
+> Jan Motl and Oliver Schulte, *"The CTU Prague Relational Learning Repository"*, arXiv:1511.03086, 2015.
+> Public read-only server: `relational.fel.cvut.cz:3306` (credentials documented in `.env.example`).
+
+### Selected Real Databases (6 Databases Across Diverse Domains)
+
+| Database | Domain | Tables | Largest Table | Largest Table Rows | Total Rows |
+| :--- | :--- | :---: | :--- | :---: | :---: |
+| **`financial`** | Banking / Financial (`PKDD'99`) | 8 | `trans` | 1,056,320 | 1,079,680 |
+| **`ErgastF1`** | Sports / Formula 1 Racing | 13 | `lapTimes` | 426,633 | 501,583 |
+| **`imdb_full`** | Entertainment / Movies | 7 | `roles` | 3,431,966 | 4,578,535 |
+| **`geneea`** | Government / Czech Parliament | 19 | `hl_check` | 1,401,568 | 1,729,344 |
+| **`stats_CEB`** *(Held-Out Test)* | Q&A Community / Stats StackExchange | 8 | `comments` | 174,305 | 665,606 |
+| **`Walmart_2014`** *(Held-Out Test)* | Retail / E-Commerce Forecasting | 4 | `train` | 421,570 | 538,992 |
+
+All secondary indexes that shipped with the dumps were stripped (keeping only primary keys and saving the original definitions in `data/original_indexes.json`) and `ANALYZE TABLE` was run on every table so all candidate indexes are measured from a clean baseline on local MySQL.
 
 ---
 
@@ -15,25 +38,28 @@ Given a SQL query against a live MySQL 8.x database, IndexBuddy:
 
 ```text
 IndexBuddy/
-├── config.py                       # Loads MySQL connection & model settings from .env
-├── .env.example                    # Template for MySQL credentials (never commit .env)
+├── config.py                       # Loads MySQL connection, CTU connection & model settings from .env
+├── .env.example                    # Template for MySQL & public CTU credentials (never commit .env)
 ├── requirements.txt                # Clean Python dependencies
-├── run_demo.py                     # One-command launcher for FastAPI + React/Vite UI
 ├── db/
 │   └── mysql_adapter.py            # Abstract DBAdapter base + concrete MySQLAdapter (MySQL 8.x)
 ├── data/
-│   └── setup_orders_benchmark.py   # Creates 1,000,000-row orders_benchmark & customers_benchmark
+│   ├── select_ctu_datasets.py      # Inspects CTU repository & prints qualifying real datasets
+│   ├── download_and_restore.py     # Dumps databases to data/raw/, restores locally & strips secondary indexes
+│   └── original_indexes.json       # Saved original non-PK indexes from the raw dumps
 ├── parsing/
-│   └── query_parser.py             # sqlglot MySQL AST parser & canonical template normalizer
+│   └── query_parser.py             # sqlglot MySQL AST parser & SELECT-only validator
 ├── candidates/
 │   └── generator.py                # Single-column & 2-column composite candidate index generator
 ├── features/
-│   └── extract.py                  # Live catalog, selectivity, index size & EXPLAIN feature extractor
+│   └── extract.py                  # Schema-agnostic catalog, selectivity, index size & EXPLAIN feature extractor
 ├── labeling/
-│   ├── build_training_set.py       # Restartable empirical benchmark runner (315 queries, 21 templates)
-│   └── training_data.csv           # 855 empirically measured (query, candidate) speedup rows
+│   ├── generate_workload.py        # Generates >=300 deduplicated queries per DB from real schemas & values
+│   ├── build_training_set.py       # Restartable empirical benchmark runner on local MySQL
+│   ├── generated_workload.csv      # 2,167 deduplicated real-schema queries across the 6 CTU databases
+│   └── training_data.csv           # 1,146 empirically measured (query, candidate) rows on local MySQL
 ├── models/
-│   ├── train.py                    # Template-split XGBoost trainer + SHAP plot generator
+│   ├── train.py                    # Leave-databases-out XGBoost trainer + SHAP plot generator
 │   ├── predict.py                  # SpeedupPredictor inference & per-candidate SHAP explainer
 │   └── xgb_speedup.joblib          # Trained XGBoost model bundle
 ├── selection/
@@ -41,15 +67,13 @@ IndexBuddy/
 ├── baselines/
 │   └── rule_based.py               # No-Index baseline & legacy Rule-Based Scorer for comparison
 ├── evaluation/
-│   ├── evaluate_baselines.py       # Evaluates baselines vs XGBoost on held-out templates
-│   ├── results.md                  # Full empirical evaluation report (MAE, RMSE, Spearman, Top-1)
+│   ├── evaluate_baselines.py       # Evaluates No-Index, Rule-Based & XGBoost on held-out databases
+│   ├── results.md                  # Full empirical leave-databases-out evaluation report
 │   └── shap_summary.png            # SHAP beeswarm feature importance summary plot
 ├── app/
-│   ├── api_server.py               # FastAPI backend serving live MySQL & XGBoost endpoints
-│   └── dashboard.py                # 6-step Streamlit dashboard
-├── frontend/                       # Modern React + Vite 6-step Live Demo & Evaluation Lab UI
+│   └── dashboard.py                # 6-step Streamlit interactive live demo dashboard
 └── tests/
-    └── test_parser_and_candidates.py # Unit tests for sqlglot parser & candidate generator
+    └── test_parser_and_candidates.py # Unit tests for parser, candidates & features across multiple schemas
 ```
 
 ---
@@ -57,99 +81,89 @@ IndexBuddy/
 ## Setup & Exact Run Order
 
 ### 1. Configure `.env`
-Copy `.env.example` to `.env` and fill in your local MySQL 8.x credentials:
+Copy `.env.example` to `.env` and fill in your local MySQL 8.0.18+ credentials:
 ```bash
 cp .env.example .env
-```
-```ini
-MYSQL_HOST=127.0.0.1
-MYSQL_PORT=3306
-MYSQL_USER=root
-MYSQL_PASSWORD=your_password_here
-MYSQL_DB=indexbuddy
 ```
 
 ### 2. Install Dependencies
 ```bash
-# Python dependencies
 pip install -r requirements.txt
-
-# React + Vite frontend dependencies
-cd frontend
-npm install
-npm run build
-cd ..
 ```
 
 ### 3. Run Pipeline in Order
-
 ```bash
-# Stage (a): Populate 1,000,000 rows in orders_benchmark (0 secondary indexes) + ANALYZE TABLE
-python -m data.setup_orders_benchmark
+# Stage 1 & 2: Inspect qualifying real CTU datasets
+python -m data.select_ctu_datasets
 
-# Stage (b): Run unit tests & verify sqlglot parser + candidate generator
-pytest -v tests/test_parser_and_candidates.py
-python -m candidates.generator
+# Stage 3: Dump from CTU (once, cached in data/raw/), restore to local MySQL,
+# strip non-PK secondary indexes (saved in data/original_indexes.json), and run ANALYZE TABLE
+python -m data.download_and_restore
 
-# Stage (c): Build empirical training dataset (315 queries across 21 templates, restartable)
-python -u -m labeling.build_training_set --workers 4
+# Stage 4: Run unit tests for parser, candidate generator, and feature extractor across schemas
+pytest -v
 
-# Stage (d): Train XGBoost model (split strictly by query template), generate SHAP plot & evaluate baselines
+# Stage 5: Generate >=300 deduplicated queries per database from real schemas/data and label on local MySQL
+python -m labeling.generate_workload
+python -m labeling.build_training_set
+
+# Stage 6: Train XGBoost model (leave-databases-out split) & evaluate against baselines
 python -m models.train
 python -m evaluation.evaluate_baselines
 
-# Stage (e): Launch the Live Demo Dashboard
-# Option 1 (Recommended — React + Vite UI + FastAPI Backend):
-python run_demo.py
-# -> Opens http://localhost:5173 (React + Vite UI) and http://127.0.0.1:8000 (API + Built UI)
-
-# Option 2 (Streamlit UI):
+# Stage 7: Launch the 6-step Streamlit Dashboard
 streamlit run app/dashboard.py
 ```
 
 ---
 
-## Held-Out Template Evaluation Summary (`evaluation/results.md`)
+## Leave-Databases-Out Evaluation Summary (`evaluation/results.md`)
 
-Queries are split **strictly by canonical SQL template** (`16` training templates / `600` pairs vs. `5` held-out unseen templates `T03, T07, T11, T16, T19` / `255` pairs):
+- **Training Databases (4)**: `ErgastF1`, `financial`, `geneea`, `imdb_full` (`321` queries, `702` labeled pairs)
+- **Held-Out Test Databases (2)**: `Walmart_2014`, `stats_CEB` (`198` queries, `444` labeled pairs — never seen during training)
 
-| Method | MAE ($\log$ speedup) $\downarrow$ | RMSE ($\log$ speedup) $\downarrow$ | Spearman $\rho$ $\uparrow$ | Top-1 Exact Acc $\uparrow$ | Top-1 Effective Acc $\uparrow$ | Decision Acc $\uparrow$ | Geometric Mean Speedup $\uparrow$ |
+| Method | MAE ($\log$ speedup) $\downarrow$ | RMSE ($\log$ speedup) $\uparrow$ | Spearman $\rho$ $\uparrow$ | Top-1 Exact $\uparrow$ | Top-1 Effective $\uparrow$ | Decision Acc $\uparrow$ | Geo-Mean Speedup $\uparrow$ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **No-Index Baseline** | `4.5055` | `5.5096` | `0.0000` | `8.0%` | `8.0%` | `8.0%` | **`1.00x`** *(Oracle: 488.35x)* |
-| **Legacy Rule-Based Scorer** | `3.7428` | `4.5245` | `0.5337` | `40.0%` | `100.0%` | `100.0%` | **`429.50x`** *(Oracle: 488.35x)* |
-| **XGBoost Speedup Model (Ours)** | **`0.9207`** | **`1.3092`** | **`0.8415`** | **`68.0%`** | **`100.0%`** | **`100.0%`** | **`461.43x`** *(Oracle: 488.35x)* |
+| **No-Index Baseline** | `1.9066` | `2.5136` | `0.0000` | `13.6%` | `13.6%` | `13.6%` | `1.00x` *(oracle 8.88x)* |
+| **Legacy Rule-Based Scorer** | `1.3438` | `1.7670` | `0.5184` | `58.1%` | `76.8%` | `84.8%` | `6.76x` *(oracle 8.88x)* |
+| **XGBoost Speedup Model (Ours)** | **`0.7300`** | **`1.1630`** | **`0.7415`** | **`65.7%`** | **`83.3%`** | **`89.4%`** | **`7.61x`** *(oracle 8.88x)* |
+
+### Per Held-Out Database Breakdown
+
+| Held-Out Database | Queries | Pairs | XGB MAE | Rule MAE | XGB Spearman | Rule Spearman | XGB Geo-Speedup | Rule Geo-Speedup | Oracle |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`Walmart_2014`** | 98 | 230 | `0.3836` | `0.8011` | `0.7181` | `0.5292` | **`3.33x`** | `3.02x` | `3.54x` |
+| **`stats_CEB`** | 100 | 214 | `1.1023` | `1.9272` | `0.7096` | `0.5758` | **`17.10x`** | `14.92x` | `21.86x` |
 
 ---
 
-## Professor Live Demo Script (5 Minutes)
+## Live Demo Script (6-Step Streamlit Dashboard)
 
-1. **Top Status Bar & Step 1 (Schema & Skew)**:
-   - Point out the live MySQL 8.0.46 connection indicator, `orders_benchmark` (`1,000,000` rows), and `0` active secondary indexes.
-   - Show the live `COUNT(DISTINCT)` cardinalities (`customer_id` ~100k, `product_id` 5,000, `status` 5) and the **`status` skew chart** (`'completed'` = ~70% of all rows).
-2. **Walkthrough A — High-Selectivity Composite Query (Held-Out Template `T11`)**:
-   - In **Step 2**, select Demo Query #1:
-     ```sql
-     SELECT order_id, customer_id, product_id, order_date, amount
-     FROM orders_benchmark
-     WHERE customer_id = 42310 AND order_date >= '2023-06-01'
-     ORDER BY order_date DESC LIMIT 25
-     ```
-   - Click **Run Query With NO Index (10 Runs)**. Observe median time (~750–1,100 ms), `EXPLAIN` (`type = ALL`, `rows = 991,211`, `Using where; Using filesort`), and the live `EXPLAIN ANALYZE` tree.
-   - In **Step 3**, click **Get Recommendation**. Show how XGBoost ranks `(customer_id, order_date)` #1 (~2,110x predicted speedup) and `(customer_id)` #2 (~1,735x), while rejecting `(order_date)` (`1.39x`) and the reversed index `(order_date, customer_id)` (`1.03x`) because `order_date` is a range predicate that violates B-tree left-prefix equality narrowing.
-   - In **Step 4**, review `CREATE INDEX idx_orders_benchmark_customer_id_order_date ON orders_benchmark (customer_id, order_date);` and click **Confirm & Execute CREATE INDEX**.
-   - In **Step 5**, click **Run Query With Index (10 Runs)**. Observe median latency drop to **< 1 ms**, `type = range`/`ref`, and `rows` drop from `991,211` to `~5`.
-   - In **Step 6**, inspect the **Predicted vs. Actual Speedup** table, bar charts, plain-English diagnostic explanation, and saved `results/run_<timestamp>.json`.
-   - Click **Reset Demo** in the top bar to drop the created index.
-3. **Walkthrough B — Low-Selectivity Negative Case (Held-Out Template `T03`)**:
-   - In **Step 2**, select Demo Query #2:
-     ```sql
-     SELECT status, COUNT(*) AS order_cnt, AVG(amount) AS avg_amt
-     FROM orders_benchmark
-     WHERE status = 'completed'
-     GROUP BY status
-     ```
-   - Run baseline (scans ~1M rows).
-   - In **Step 3**, click **Get Recommendation**. Show that XGBoost predicts **`0.33x` speedup** (below the `1.50x` threshold) because `status = 'completed'` matches 69.97% of the table, and therefore **recommends NO INDEX**.
-   - Optionally use the **Professor Verification Option** in Step 4 to force-create `idx_orders_benchmark_status` anyway and run Step 5 & 6 to prove empirically that MySQL's cost-based optimizer either ignores the index or gains ~1.0x (no speedup).
-4. **SHAP & Evaluation Lab Tab**:
-   - Switch to the **SHAP & Evaluation Lab** tab in the top bar to show the held-out template evaluation metrics and the `evaluation/shap_summary.png` beeswarm plot.
+Launch the dashboard with `streamlit run app/dashboard.py`:
+
+1. **Connect & Select Any Database/Table (Sidebar + Top Status Bar)**:
+   - Enter local MySQL host/port/user/password and click **Connect**.
+   - Pick any held-out database and table (e.g., `stats_CEB.posts` or `Walmart_2014.train`). The top status bar always displays the live connection state, selected database, selected table, and total row count.
+2. **Step 1 — Table Schema & Sample Records**:
+   - Inspect auto-discovered column types, primary keys, sampled distinct counts, null fractions, existing indexes, and 20 live sample rows. Click **Next ➡️**.
+3. **Step 2 — Choose or Edit Query & Run Baseline (No Index)**:
+   - Choose from dynamically generated sample queries for the selected table, paste a custom `SELECT` query (e.g., as a purely illustrative example on a hypothetical e-commerce schema: `SELECT * FROM orders_benchmark WHERE customer_id = 42 AND payment_method = 'card'`), or upload a `.sql`/`.csv` file.
+   - Click **▶ Run without index** to execute 10 timed runs (discarding 1 warm-up) and view the live median runtime, rows examined, `EXPLAIN`, and `EXPLAIN ANALYZE`. Click **Next ➡️**.
+4. **Step 3 — ML Recommendation**:
+   - Click **🤖 Get recommendation from IndexBuddy** to view all candidate indexes ranked by predicted speedup, selectivity, estimated index size (MB), and top SHAP factors.
+   - Select the generated low-selectivity sample query (#3) to verify that the model predicts `< 1.50x` speedup and recommends **No Index**.
+5. **Step 4 — Generated DDL & Explicit Confirmation**:
+   - Inspect the `CREATE INDEX` DDL, estimated index size, and large-table warning. Click **✅ Confirm and create index** to build the index on local MySQL.
+6. **Step 5 & Step 6 — Post-Index Benchmark, Comparison & Reset**:
+   - Click **▶ Run same query with index** to measure the new median runtime over 10 runs, new `EXPLAIN`, and `EXPLAIN ANALYZE`.
+   - Advance to **Step 6** to view the Predicted vs. Actual speedup table, error %, before/after rows examined, interactive bar chart, plain-English discrepancy analysis, and saved JSON report (`results/run_<timestamp>.json`).
+   - Click **🔄 Reset demo (drop IndexBuddy index)** in the sidebar to drop only the `idx_ib_*` index created by IndexBuddy.
+
+---
+
+## Limitations of the Approach
+
+1. **Workload Generated from Real Schemas & Data (No Real Query Logs)**: The public CTU Prague Relational Learning Repository provides real database schemas and real row distributions, but does not include production query logs. Queries in `labeling/generated_workload.csv` are systematically generated from the real schemas, real foreign keys, and real column value distributions (preserving actual data skew).
+2. **Single-Query Scope vs. Workload-Level Trade-Offs**: IndexBuddy evaluates candidates for one `SELECT` query at a time and does not jointly optimize write amplification (`INSERT`/`UPDATE`/`DELETE` overhead) or shared prefix consolidation across a multi-query workload.
+3. **Buffer Pool Warm-Cache Effects**: Because measurements run against a warm InnoDB buffer pool on local MySQL (discarding 1 warm-up run), measured wall-clock speedups reflect in-memory page scanning and B-tree traversal rather than cold-disk I/O latency.
+4. **Up to 2-Column Composite B-Tree Indexes**: Candidate generation focuses on single-column and 2-column B-tree indexes and does not propose covering `INCLUDE`-style extensions, spatial (`R-tree`), or full-text indexes.

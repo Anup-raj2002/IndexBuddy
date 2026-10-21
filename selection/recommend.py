@@ -1,14 +1,4 @@
-"""
-selection/recommend.py
-──────────────────────
-ML-driven index selection engine and dynamic sample query generator.
-Zero hardcoded table or column names.
 
-All candidate scoring and ranking is performed exclusively by the trained
-XGBoost speedup regression model (``models/predict.py``). A candidate is
-recommended when its ML-predicted speedup is at least ``threshold`` (default
-1.5x from ``config.py``); otherwise no index is recommended.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -78,15 +68,33 @@ def generate_sample_queries_for_table(
     if not non_pk_cols:
         non_pk_cols = [cs for cs in t_stats.columns.values() if cs.is_indexable]
 
-    # Sort non-PK columns by cardinality descending
+    # Sort non-PK columns by cardinality descending, preferring columns whose
+    # tail sample value frequency is in [0.0004, 0.01] (selective enough for a
+    # strong index speedup without hitting the 0-row / sub-ms TCP floor).
     by_card_desc = sorted(non_pk_cols, key=lambda c: c.cardinality, reverse=True)
+
+    def _tail_freq(cs: ColumnStats) -> float:
+        if not cs.sample_values or not cs.value_frequencies:
+            return 0.0
+        return cs.value_frequencies.get(str(cs.sample_values[-1]).lower(), 0.0)
+
+    sweet_cols = [
+        c
+        for c in by_card_desc
+        if c.cardinality >= 30
+        and c.distinct_ratio <= 0.65
+        and 0.0004 <= _tail_freq(c) <= 0.015
+    ]
+    preferred_cols = sweet_cols + [c for c in by_card_desc if c not in sweet_cols]
     by_card_asc = [c for c in sorted(non_pk_cols, key=lambda c: c.cardinality) if c.cardinality >= 2]
 
-    high_col: Optional[ColumnStats] = by_card_desc[0] if by_card_desc else None
-    second_col: Optional[ColumnStats] = by_card_desc[1] if len(by_card_desc) > 1 else high_col
+    high_col: Optional[ColumnStats] = preferred_cols[0] if preferred_cols else None
+    second_col: Optional[ColumnStats] = (
+        preferred_cols[1] if len(preferred_cols) > 1 else high_col
+    )
     low_col: Optional[ColumnStats] = by_card_asc[0] if by_card_asc else high_col
 
-    # Pick a range/orderable column (numeric or date with >10 distinct values)
+    # Pick a range/orderable column (numeric or date with >= 5 distinct values)
     range_cols = [
         c
         for c in by_card_desc
@@ -94,7 +102,17 @@ def generate_sample_queries_for_table(
         and c.min_value is not None
         and c.max_value is not None
         and c.cardinality >= 5
+        and c.distinct_ratio <= 0.70
     ]
+    if not range_cols:
+        range_cols = [
+            c
+            for c in by_card_desc
+            if c.data_type_code in (1, 2, 3)
+            and c.min_value is not None
+            and c.max_value is not None
+            and c.cardinality >= 5
+        ]
     range_col: Optional[ColumnStats] = (
         next((c for c in range_cols if high_col and c.column_name != high_col.column_name), None)
         or (range_cols[0] if range_cols else second_col)
@@ -105,12 +123,33 @@ def generate_sample_queries_for_table(
 
     samples: List[Dict[str, str]] = []
 
-    # 1. High-selectivity point lookup + range/sort (Strong index candidate)
+    # 1. High-selectivity composite lookup or filter + GROUP BY
     if high_col and high_col.sample_values:
-        # Pick a less common sample value (tail of top-30) for high selectivity
         val_hi = high_col.sample_values[-1]
-        if range_col and range_col.column_name != high_col.column_name and range_col.sample_values:
-            val_rng = range_col.sample_values[len(range_col.sample_values) // 2]
+        if (
+            t_stats.table_rows > 500_000
+            and range_col
+            and range_col.column_name != high_col.column_name
+        ):
+            q1 = (
+                f"SELECT `{range_col.column_name}`, COUNT(*) AS cnt "
+                f"FROM `{tbl}` "
+                f"WHERE `{high_col.column_name}` = {_sql_literal(val_hi)} "
+                f"GROUP BY `{range_col.column_name}`"
+            )
+            samples.append(
+                {
+                    "title": f"1. Selective Filter + GROUP BY (`{high_col.column_name}`, `{range_col.column_name}`)",
+                    "category": "high_selectivity_composite",
+                    "description": (
+                        f"Selective equality filter on `{high_col.column_name}` "
+                        f"({high_col.cardinality:,} distinct values) grouped by `{range_col.column_name}`."
+                    ),
+                    "sql": q1,
+                }
+            )
+        elif range_col and range_col.column_name != high_col.column_name and range_col.sample_values:
+            val_rng = range_col.sample_values[0]
             q1 = (
                 f"SELECT {proj} FROM `{tbl}` "
                 f"WHERE `{high_col.column_name}` = {_sql_literal(val_hi)} "
@@ -122,7 +161,7 @@ def generate_sample_queries_for_table(
                     "title": f"1. High-Selectivity Composite Filter + Sort (`{high_col.column_name}`, `{range_col.column_name}`)",
                     "category": "high_selectivity_composite",
                     "description": (
-                        f"Equality filter on high-cardinality `{high_col.column_name}` "
+                        f"Equality filter on `{high_col.column_name}` "
                         f"({high_col.cardinality:,} distinct values) combined with range & ORDER BY on `{range_col.column_name}`."
                     ),
                     "sql": q1,

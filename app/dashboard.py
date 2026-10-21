@@ -1,465 +1,460 @@
 """
 app/dashboard.py
 ────────────────
-Step-by-step live MySQL 8.x & XGBoost Index Recommender Dashboard (Streamlit).
+IndexBuddy live demo dashboard (Streamlit). Fully dynamic: works on ANY database
+and table of the connected MySQL server. No table or column names are hardcoded.
 
-Every number displayed (row counts, cardinalities, EXPLAIN plans, EXPLAIN ANALYZE
-trees, 10-run median latencies, XGBoost predicted speedups, and SHAP attributions)
-is queried live from MySQL 8.x or computed by the trained XGBoost model.
+Run:  streamlit run app/dashboard.py
 
-Run with:
-    streamlit run app/dashboard.py
+Every number shown comes from the live database or the trained model.
 """
 from __future__ import annotations
 
+import io
+import json
 import sys
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-import config
-from app.api_server import (
-    DEMO_QUERIES,
-    CompareRequest,
-    CreateIndexRequest,
-    RecommendRequest,
-    RunQueryRequest,
-    get_db_status,
-    get_evaluation_summary,
-    get_step1_schema,
-    reset_demo,
-    run_step2_baseline,
-    run_step3_recommend,
-    run_step4_create_index,
-    run_step5_after,
-    run_step6_compare,
+# Make project imports work when launched as `streamlit run app/dashboard.py`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import config  # noqa: E402
+from db.mysql_adapter import MySQLAdapter  # noqa: E402
+from features.extract import StatsCache  # noqa: E402
+from models.predict import SpeedupPredictor  # noqa: E402
+from parsing.query_parser import validate_select_only  # noqa: E402
+from selection.recommend import (  # noqa: E402
+    explain_prediction_vs_actual,
+    generate_sample_queries_for_table,
+    recommend_index,
 )
 
+st.set_page_config(page_title="IndexBuddy", page_icon="🗂️", layout="wide")
 
-def main() -> None:
-    st.set_page_config(
-        page_title="IndexBuddy | ML MySQL Index Recommender",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+STEP_TITLES = {
+    1: "Table schema and records",
+    2: "Run the query WITHOUT an index",
+    3: "ML index recommendation",
+    4: "Generated DDL and confirmation",
+    5: "Run the same query WITH the index",
+    6: "Predicted vs actual comparison",
+}
+LARGE_TABLE_ROWS = 2_000_000
+LARGE_INDEX_MB = 500.0
 
-    if "step" not in st.session_state:
-        st.session_state.step = 1
-    if "selected_demo_idx" not in st.session_state:
-        st.session_state.selected_demo_idx = 0
-    if "sql_query" not in st.session_state:
-        st.session_state.sql_query = DEMO_QUERIES[0]["sql"]
-    if "threshold" not in st.session_state:
-        st.session_state.threshold = float(config.SPEEDUP_THRESHOLD)
-    if "step2_data" not in st.session_state:
-        st.session_state.step2_data = None
-    if "step3_data" not in st.session_state:
-        st.session_state.step3_data = None
-    if "step4_data" not in st.session_state:
-        st.session_state.step4_data = None
-    if "step5_data" not in st.session_state:
-        st.session_state.step5_data = None
-    if "step6_data" not in st.session_state:
-        st.session_state.step6_data = None
 
-    # ── Top Persistent Database Status Bar ──────────────────────
-    status = get_db_status()
-    top_c1, top_c2, top_c3, top_c4, top_c5 = st.columns([2.2, 1.5, 1.5, 1.8, 1.2])
-    with top_c1:
-        if status.get("connected"):
-            st.success(
-                f"MySQL {status.get('mysql_version')} Connected "
-                f"({status.get('host')}:{status.get('port')}/{status.get('database')})"
-            )
-        else:
-            st.error(f"MySQL Disconnected: {status.get('error', 'Unknown error')}")
-    with top_c2:
-        st.metric("Benchmark Table", f"`{status.get('table_name')}`")
-    with top_c3:
-        st.metric("Total Rows", f"{status.get('total_rows', 0):,}")
-    with top_c4:
-        sec_idx = status.get("secondary_indexes", [])
-        st.metric(
-            "Active Secondary Indexes",
-            f"{len(sec_idx)} ({', '.join(sec_idx) if sec_idx else 'None'})",
-        )
-    with top_c5:
-        if st.button("Reset Demo (Drop Indexes)", type="secondary", use_container_width=True):
-            try:
-                res = reset_demo()
-                st.session_state.step2_data = None
-                st.session_state.step3_data = None
-                st.session_state.step4_data = None
-                st.session_state.step5_data = None
-                st.session_state.step6_data = None
-                st.session_state.step = 1
-                st.toast(f"Dropped secondary indexes: {res.get('dropped_indexes')}")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Failed to reset demo: {exc}")
-
-    st.divider()
-
-    # ── Step Progress Bar ───────────────────────────────────────
-    step_titles = [
-        "1. Schema & Sample",
-        "2. Baseline (No Index)",
-        "3. ML Recommendation",
-        "4. Confirm CREATE INDEX",
-        "5. Post-Index Run",
-        "6. Predicted vs Actual",
-    ]
-    nav_cols = st.columns(6)
-    for idx, title in enumerate(step_titles, 1):
-        with nav_cols[idx - 1]:
-            btn_type = "primary" if st.session_state.step == idx else "secondary"
-            if st.button(title, key=f"nav_{idx}", type=btn_type, use_container_width=True):
-                st.session_state.step = idx
-                st.rerun()
-
-    st.markdown("---")
-    step = st.session_state.step
-
-    # ── STEP 1: Schema & Sample ─────────────────────────────────
-    if step == 1:
-        st.header("Step 1: `orders_benchmark` Live Schema, Cardinalities & Sample Records")
+def _stretch(fn):
+    """Full-width widgets across Streamlit versions (new `width` API, old `use_container_width`)."""
+    def wrapper(*args, **kwargs):
         try:
-            s1 = get_step1_schema()
-            c_left, c_right = st.columns([1.4, 1.0])
-            with c_left:
-                st.subheader("Live Column Metadata & `COUNT(DISTINCT)` Cardinality")
-                st.dataframe(pd.DataFrame(s1["schema"]), use_container_width=True)
-            with c_right:
-                st.subheader("`status` Column Skew Distribution (Live)")
-                skew_df = pd.DataFrame(s1["status_distribution"])
-                st.dataframe(skew_df, use_container_width=True)
+            return fn(*args, width="stretch", **kwargs)
+        except TypeError:
+            return fn(*args, use_container_width=True, **kwargs)
+    return wrapper
 
-            st.subheader("Sample Records from `orders_benchmark` (Live)")
-            st.dataframe(pd.DataFrame(s1["sample_records"]), use_container_width=True)
+
+_dataframe = _stretch(st.dataframe)
+_plotly_chart = _stretch(st.plotly_chart)
+
+
+# ─────────────────────────── helpers ───────────────────────────
+def _ss(key: str, default: Any = None) -> Any:
+    return st.session_state.get(key, default)
+
+
+def _reset_demo_state(keep_connection: bool = True) -> None:
+    for k in ("step", "sql", "baseline", "after", "rec", "created_index", "saved_path"):
+        st.session_state.pop(k, None)
+    st.session_state["step"] = 1
+
+
+def _safe_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """DataFrame that Streamlit/Arrow can always render (Decimal, bytes, dates)."""
+    return pd.DataFrame(rows).astype(str)
+
+
+def _get_db() -> Optional[MySQLAdapter]:
+    db: Optional[MySQLAdapter] = _ss("db")
+    if db is None:
+        return None
+    try:
+        if not db.is_connected():
+            db.connect()
+            if _ss("database"):
+                db.use_database(_ss("database"))
+    except Exception:
+        return None
+    return db
+
+
+def _measure(db: MySQLAdapter, sql: str) -> Dict[str, Any]:
+    """Run the query live: median time, rows examined, EXPLAIN, EXPLAIN ANALYZE."""
+    median_s, rows_examined, times = db.timed_execute(
+        sql, runs=config.DASHBOARD_RUNS, warmup=1
+    )
+    plan = db.explain(sql)
+    try:
+        analyze = db.explain_analyze(sql)
+    except Exception as exc:  # needs MySQL 8.0.18+
+        analyze = f"EXPLAIN ANALYZE unavailable: {exc}"
+    return {
+        "median_s": median_s,
+        "rows_examined": int(rows_examined),
+        "runs_s": times,
+        "explain": plan,
+        "explain_analyze": analyze,
+    }
+
+
+def _plan_row(plan: List[Dict[str, Any]], table: str) -> Dict[str, Any]:
+    for r in plan:
+        if str(r.get("table") or "").lower() == table.lower():
+            return r
+    return plan[0] if plan else {}
+
+
+def _parse_uploaded_queries(name: str, data: bytes) -> List[str]:
+    text = data.decode("utf-8", errors="replace")
+    if name.lower().endswith(".csv"):
+        df = pd.read_csv(io.StringIO(text))
+        col = "sql" if "sql" in df.columns else df.columns[0]
+        return [str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()]
+    return [q.strip() for q in text.split(";") if q.strip()]
+
+
+# ─────────────────────────── sidebar ───────────────────────────
+def sidebar() -> None:
+    st.sidebar.title("🗂️ IndexBuddy")
+    st.sidebar.caption("ML-based MySQL index recommender")
+    st.sidebar.subheader("1. Connect")
+    host = st.sidebar.text_input("Host", config.MYSQL_HOST)
+    port = st.sidebar.number_input("Port", value=int(config.MYSQL_PORT), step=1)
+    user = st.sidebar.text_input("User", config.MYSQL_USER)
+    password = st.sidebar.text_input("Password", config.MYSQL_PASSWORD, type="password")
+
+    if st.sidebar.button("Connect", type="primary"):
+        try:
+            db = MySQLAdapter(host=host, port=int(port), user=user, password=password)
+            db.connect()
+            st.session_state["db"] = db
+            st.session_state["databases"] = db.list_databases()
+            _reset_demo_state()
+            st.sidebar.success("Connected")
         except Exception as exc:
-            st.error(f"Error loading schema: {exc}")
+            st.session_state.pop("db", None)
+            st.sidebar.error(f"Connection failed: {exc}")
 
-        if st.button("Next: Step 2 (Choose & Run Demo Query) ->", type="primary"):
-            st.session_state.step = 2
+    db = _get_db()
+    if db is None:
+        return
+
+    st.sidebar.subheader("2. Choose database and table")
+    dbs: List[str] = _ss("databases", [])
+    database = st.sidebar.selectbox("Database", dbs, key="sel_database")
+    if not database:
+        return
+    db.use_database(database)
+    tables = db.list_tables(database)
+    names = [t["table_name"] for t in tables]
+    if not names:
+        st.sidebar.warning("No base tables in this database.")
+        return
+    table = st.sidebar.selectbox("Table", names, key="sel_table")
+
+    key = f"{database}.{table}"
+    if _ss("sel_key") != key:  # selection changed -> fresh demo + fresh stats cache
+        st.session_state["sel_key"] = key
+        st.session_state["database"] = database
+        st.session_state["table"] = table
+        st.session_state["stats_cache"] = StatsCache(db)
+        st.session_state["total_rows"] = db.row_count(table)
+        _reset_demo_state()
+
+    st.sidebar.divider()
+    st.sidebar.number_input(
+        "Recommendation threshold (x speedup)",
+        min_value=1.0, max_value=50.0, value=float(config.SPEEDUP_THRESHOLD),
+        step=0.1, key="threshold",
+    )
+    if st.sidebar.button("🔄 Reset demo (drop IndexBuddy index)"):
+        try:
+            dropped = db.drop_indexbuddy_indexes(table)
+            st.sidebar.success(f"Dropped: {dropped or 'nothing to drop'}")
+        except Exception as exc:
+            st.sidebar.error(f"Reset failed: {exc}")
+        _reset_demo_state()
+        st.rerun()
+
+
+# ─────────────────────────── status bar ───────────────────────────
+def status_bar() -> None:
+    db = _get_db()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("MySQL", "Connected ✅" if db else "Not connected ❌")
+    c2.metric("Database", _ss("database", "–"))
+    c3.metric("Table", _ss("table", "–"))
+    total = _ss("total_rows")
+    c4.metric("Total rows", f"{total:,}" if total is not None else "–")
+
+
+# ─────────────────────────── steps ───────────────────────────
+def next_button(step: int, enabled: bool = True, label: str = "Next ➡️") -> None:
+    if _ss("step", 1) == step:
+        if st.button(label, key=f"next_{step}", disabled=not enabled):
+            st.session_state["step"] = step + 1
             st.rerun()
 
-    # ── STEP 2: Baseline Query Execution (No Index) ─────────────
-    elif step == 2:
-        st.header("Step 2: Choose Held-Out Demo Query & Run with NO Secondary Index")
-        labels = [d["label"] for d in DEMO_QUERIES]
-        chosen_idx = st.selectbox(
-            "Select Held-Out Demo Query Template (Never Seen in Training):",
-            options=list(range(len(labels))),
-            format_func=lambda i: labels[i],
-            index=st.session_state.selected_demo_idx,
-        )
-        if chosen_idx != st.session_state.selected_demo_idx:
-            st.session_state.selected_demo_idx = chosen_idx
-            st.session_state.sql_query = DEMO_QUERIES[chosen_idx]["sql"]
 
-        st.caption(DEMO_QUERIES[chosen_idx]["description"])
-        sql_text = st.text_area("Editable SQL Query:", value=st.session_state.sql_query, height=100)
-        st.session_state.sql_query = sql_text
+def step1(db: MySQLAdapter, table: str) -> None:
+    cache: StatsCache = _ss("stats_cache")
+    t_stats = cache.get_table_stats(table)
+    st.caption(
+        f"{t_stats.table_rows:,} rows (catalog estimate) · primary key: "
+        f"{', '.join(t_stats.primary_key_columns) or 'none'}"
+    )
+    cols = []
+    for cs in t_stats.columns.values():
+        d = asdict(cs)
+        d.pop("value_frequencies", None)
+        d.pop("sample_values", None)
+        cols.append(d)
+    st.subheader("Columns and live statistics")
+    _dataframe(_safe_df(cols))
 
-        if st.button("Run Baseline Query (10 Runs, 1 Warm-Up Discarded, No Index)", type="primary"):
-            with st.spinner("Dropping any secondary indexes and executing 10 live runs on MySQL..."):
-                try:
-                    res2 = run_step2_baseline(
-                        RunQueryRequest(
-                            sql=sql_text,
-                            runs=config.DASHBOARD_RUNS,
-                            warmup=1,
-                            drop_secondary_indexes_first=True,
-                        )
-                    )
-                    st.session_state.step2_data = res2
-                except Exception as exc:
-                    st.error(f"Error running baseline query: {exc}")
+    idx = db.get_existing_indexes(table)
+    st.subheader("Existing indexes")
+    _dataframe(_safe_df(idx)) if idx else st.info("No indexes.")
 
-        if st.session_state.step2_data:
-            m = st.session_state.step2_data["measurement"]
-            p = st.session_state.step2_data["parsed"]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Median Time (10 runs, 1 warmup)", f"{m['median_time_ms']:.2f} ms")
-            m2.metric("Rows Examined (EXPLAIN)", f"{m['rows_examined']:,}")
-            m3.metric("Access Type", f"`{m['access_type']}`")
-            m4.metric("Key Used", f"`{m['key_used'] or 'NONE'}`")
+    st.subheader("Sample records")
+    rows = db.execute(f"SELECT * FROM `{table}` LIMIT 20")
+    _dataframe(_safe_df(rows))
+    next_button(1)
 
-            st.subheader("Parsed AST Metadata (`sqlglot` MySQL dialect)")
-            st.json(p)
 
-            st.subheader("Live `EXPLAIN` Output (No Index)")
-            st.dataframe(pd.DataFrame(m["explain_rows"]), use_container_width=True)
+def step2(db: MySQLAdapter, table: str) -> None:
+    cache: StatsCache = _ss("stats_cache")
+    leftovers = db.get_indexbuddy_indexes(table)
+    if leftovers and not _ss("created_index"):
+        st.warning(f"IndexBuddy indexes already exist on `{table}`: {leftovers}. "
+                   "Use 'Reset demo' in the sidebar for a clean baseline.")
 
-            st.subheader("Live `EXPLAIN ANALYZE` Tree (No Index)")
-            st.code(m["explain_analyze"], language="text")
-
-            if st.button("Next: Step 3 (Get ML Index Recommendation) ->", type="primary"):
-                st.session_state.step = 3
-                st.rerun()
-
-    # ── STEP 3: ML Recommendation ───────────────────────────────
-    elif step == 3:
-        st.header("Step 3: XGBoost Candidate Scoring & Index Recommendation")
-        st.code(st.session_state.sql_query, language="sql")
-        thresh = st.slider(
-            "Minimum Predicted Speedup Threshold (x):",
-            min_value=1.1,
-            max_value=5.0,
-            value=float(st.session_state.threshold),
-            step=0.1,
-        )
-        st.session_state.threshold = thresh
-
-        if st.button("Get Recommendation (Score Candidates with XGBoost)", type="primary"):
-            with st.spinner("Extracting live catalog/EXPLAIN features & scoring with XGBoost..."):
-                try:
-                    res3 = run_step3_recommend(
-                        RecommendRequest(sql=st.session_state.sql_query, threshold=thresh)
-                    )
-                    st.session_state.step3_data = res3
-                except Exception as exc:
-                    st.error(f"Recommendation error: {exc}")
-
-        if st.session_state.step3_data:
-            s3 = st.session_state.step3_data
-            if s3["recommend_create_index"]:
-                st.success(s3["reason"])
-            else:
-                st.warning(s3["reason"])
-
-            cands_df = pd.DataFrame(s3["ranked_candidates"])
-            if not cands_df.empty:
-                display_cols = [
-                    "rank",
-                    "columns_display",
-                    "predicted_speedup",
-                    "predicted_log_speedup",
-                    "estimated_selectivity_pct",
-                    "estimated_index_size_mb",
-                    "meets_threshold",
-                    "ddl",
-                ]
-                st.subheader("Ranked Candidate Indexes (Scored by XGBoost)")
-                st.dataframe(cands_df[display_cols], use_container_width=True)
-
-            if st.button("Next: Step 4 (Review & Confirm DDL) ->", type="primary"):
-                st.session_state.step = 4
-                st.rerun()
-
-    # ── STEP 4: Confirm CREATE INDEX ────────────────────────────
-    elif step == 4:
-        st.header("Step 4: Confirm `CREATE INDEX` DDL Execution")
-        s3 = st.session_state.step3_data
-        if not s3:
-            st.info("Please run Step 3 first to generate a candidate recommendation.")
+    source = st.radio("Query source", ["Generated sample query", "Type or paste SQL",
+                                       "Upload .sql / .csv"], horizontal=True)
+    sql = ""
+    if source == "Generated sample query":
+        t_stats = cache.get_table_stats(table)
+        samples = generate_sample_queries_for_table(t_stats, db.get_foreign_keys())
+        if not samples:
+            st.info("No sample queries could be generated for this table.")
         else:
-            target_cand = s3.get("recommended_candidate") or s3.get("top_fallback_candidate")
-            if s3.get("recommend_create_index") and target_cand:
-                st.success(
-                    f"Recommended Candidate: `{target_cand['index_name']}` "
-                    f"(Predicted Speedup: **{target_cand['predicted_speedup']:.2f}x**)"
+            pick = st.selectbox("Sample query", range(len(samples)),
+                                format_func=lambda i: samples[i]["title"])
+            st.caption(samples[pick].get("description", ""))
+            sql = st.text_area("SQL (editable)", samples[pick]["sql"], height=140,
+                               key=f"sample_{pick}_{table}")
+    elif source == "Type or paste SQL":
+        sql = st.text_area("SQL", "", height=140,
+                           placeholder="SELECT ... FROM ... WHERE ...")
+    else:
+        up = st.file_uploader("Upload .sql (semicolon separated) or .csv (column 'sql')",
+                              type=["sql", "csv"])
+        if up is not None:
+            qs = _parse_uploaded_queries(up.name, up.getvalue())
+            if qs:
+                i = st.selectbox("Query", range(len(qs)), format_func=lambda i: qs[i][:90])
+                sql = st.text_area("SQL (editable)", qs[i], height=140, key=f"up_{i}")
+
+    if st.button("▶ Run without index", type="primary", disabled=not sql.strip()):
+        try:
+            validate_select_only(sql)
+        except Exception as exc:
+            st.error(f"Only SELECT queries are allowed: {exc}")
+            return
+        try:
+            with st.spinner(f"Running {config.DASHBOARD_RUNS} times (first run discarded)..."):
+                st.session_state["baseline"] = _measure(db, sql)
+            st.session_state["sql"] = sql
+            for k in ("after", "rec", "created_index"):
+                st.session_state.pop(k, None)
+        except Exception as exc:
+            st.error(f"Query failed: {exc}")
+            return
+
+    base = _ss("baseline")
+    if base:
+        c1, c2 = st.columns(2)
+        c1.metric("Median time (no index)", f"{base['median_s']*1000:.2f} ms")
+        c2.metric("Rows examined (EXPLAIN)", f"{base['rows_examined']:,}")
+        st.markdown("**EXPLAIN**")
+        _dataframe(_safe_df(base["explain"]))
+        st.markdown("**EXPLAIN ANALYZE**")
+        st.code(base["explain_analyze"])
+    next_button(2, enabled=base is not None)
+
+
+def step3(db: MySQLAdapter, table: str) -> None:
+    if st.button("🤖 Get recommendation from IndexBuddy", type="primary"):
+        try:
+            with st.spinner("Scoring candidates with the trained model..."):
+                st.session_state["rec"] = recommend_index(
+                    _ss("sql"), _ss("stats_cache"), target_table=table,
+                    predictor=SpeedupPredictor(), threshold=float(_ss("threshold")),
                 )
-                st.code(target_cand["ddl"], language="sql")
-                if st.button("Confirm & Create Index on Live MySQL", type="primary"):
-                    with st.spinner("Executing CREATE INDEX and ANALYZE TABLE on MySQL..."):
-                        try:
-                            res4 = run_step4_create_index(
-                                CreateIndexRequest(
-                                    table=target_cand["table"],
-                                    index_name=target_cand["index_name"],
-                                    ddl=target_cand["ddl"],
-                                )
-                            )
-                            st.session_state.step4_data = {
-                                **res4,
-                                "candidate": target_cand,
-                            }
-                        except Exception as exc:
-                            st.error(f"MySQL DDL Error: {exc}")
-            else:
-                st.warning(s3["reason"])
-                st.info(
-                    "The ML model recommends creating NO index because predicted speedup "
-                    f"is below the {s3['threshold']:.2f}x threshold. For demonstration purposes, "
-                    "you can optionally force-create the top candidate below to verify empirically "
-                    "on live MySQL that the index does not meaningfully speed up the query."
-                )
-                if target_cand:
-                    st.code(target_cand["ddl"], language="sql")
-                    if st.button("Force-Create Index Anyway (Verify Low-Selectivity Case)", type="secondary"):
-                        with st.spinner("Executing CREATE INDEX and ANALYZE TABLE on MySQL..."):
-                            res4 = run_step4_create_index(
-                                CreateIndexRequest(
-                                    table=target_cand["table"],
-                                    index_name=target_cand["index_name"],
-                                    ddl=target_cand["ddl"],
-                                )
-                            )
-                            st.session_state.step4_data = {
-                                **res4,
-                                "candidate": target_cand,
-                            }
+        except FileNotFoundError as exc:
+            st.error(f"{exc}")
+            return
+        except Exception as exc:
+            st.error(f"Recommendation failed: {exc}")
+            return
 
-            if st.session_state.step4_data:
-                s4 = st.session_state.step4_data
-                st.success(
-                    f"Index `{s4['index_name']}` created on `{s4['table']}` in {s4['ddl_time_s']:.2f}s!"
-                )
-                if st.button("Next: Step 5 (Re-Run Query With Index) ->", type="primary"):
-                    st.session_state.step = 5
-                    st.rerun()
+    rec = _ss("rec")
+    if rec:
+        if rec.ranked_candidates:
+            _dataframe(pd.DataFrame([{
+                "Candidate columns": s.candidate.columns_display,
+                "Predicted speedup (x)": s.predicted_speedup,
+                "Est. selectivity": f"{s.estimated_selectivity*100:.4f}%",
+                "Est. index size (MB)": round(s.estimated_index_size_mb, 2),
+            } for s in rec.ranked_candidates]))
+        (st.success if rec.recommended else st.info)(rec.reason)
+        if rec.recommended and rec.recommended.shap_top_factors:
+            with st.expander("Why? Top model factors (SHAP)"):
+                _dataframe(_safe_df(rec.recommended.shap_top_factors))
+    next_button(3, enabled=bool(rec and rec.recommended),
+                label="Next ➡️ (needs a recommended index)")
 
-    # ── STEP 5: Run Query Again With Index ──────────────────────
-    elif step == 5:
-        st.header("Step 5: Re-Run Query WITH Created Index (10 Runs, 1 Warm-Up Discarded)")
-        st.code(st.session_state.sql_query, language="sql")
-        if st.button("Run Query With Index (10 Runs)", type="primary"):
-            with st.spinner("Running query 10 times with the new index on MySQL..."):
-                try:
-                    res5 = run_step5_after(
-                        RunQueryRequest(
-                            sql=st.session_state.sql_query,
-                            runs=config.DASHBOARD_RUNS,
-                            warmup=1,
-                        )
-                    )
-                    st.session_state.step5_data = res5
-                except Exception as exc:
-                    st.error(f"Execution error: {exc}")
 
-        if st.session_state.step5_data:
-            m = st.session_state.step5_data["measurement"]
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Median Time After (10 runs)", f"{m['median_time_ms']:.2f} ms")
-            c2.metric("Rows Examined After (EXPLAIN)", f"{m['rows_examined']:,}")
-            c3.metric("Access Type After", f"`{m['access_type']}`")
-            c4.metric("Key Used After", f"`{m['key_used'] or 'NONE'}`")
+def step4(db: MySQLAdapter, table: str) -> None:
+    rec = _ss("rec")
+    cand = rec.recommended
+    st.markdown("**Generated DDL**")
+    st.code(cand.candidate.ddl, language="sql")
+    st.caption(f"Estimated index size: ~{cand.estimated_index_size_mb:.2f} MB · "
+               f"predicted speedup {cand.predicted_speedup:.2f}x")
+    total = _ss("total_rows", 0)
+    if total > LARGE_TABLE_ROWS or cand.estimated_index_size_mb > LARGE_INDEX_MB:
+        st.warning("Large table: building this index may take a while and use disk space.")
 
-            st.subheader("New `EXPLAIN` Output (With Index)")
-            st.dataframe(pd.DataFrame(m["explain_rows"]), use_container_width=True)
-
-            st.subheader("New `EXPLAIN ANALYZE` Tree (With Index)")
-            st.code(m["explain_analyze"], language="text")
-
-            if st.button("Next: Step 6 (Predicted vs Actual Comparison) ->", type="primary"):
-                st.session_state.step = 6
+    if _ss("created_index"):
+        st.success(f"Index `{_ss('created_index')}` created.")
+    else:
+        if st.button("✅ Confirm and create index", type="primary"):
+            try:
+                with st.spinner("Creating index..."):
+                    db.execute_ddl(cand.candidate.ddl)
+                st.session_state["created_index"] = cand.candidate.index_name
                 st.rerun()
-
-    # ── STEP 6: Comparison Table, Bar Chart & Diagnostic ────────
-    elif step == 6:
-        st.header("Step 6: Predicted vs. Actual Speedup Comparison & Diagnostic Analysis")
-        s2 = st.session_state.step2_data
-        s3 = st.session_state.step3_data
-        s4 = st.session_state.step4_data
-        s5 = st.session_state.step5_data
-
-        if not (s2 and s3 and s5):
-            st.warning("Please complete Steps 2, 3, and 5 first.")
-        else:
-            cand = (s4 or {}).get("candidate") or s3.get("recommended_candidate") or s3.get("top_fallback_candidate")
-            if st.session_state.step6_data is None:
-                comp = run_step6_compare(
-                    CompareRequest(
-                        sql=st.session_state.sql_query,
-                        chosen_index_name=cand["index_name"] if cand else None,
-                        chosen_columns=cand["columns_display"] if cand else None,
-                        ddl_executed=cand["ddl"] if cand else None,
-                        predicted_speedup=float(cand["predicted_speedup"]) if cand else 1.0,
-                        estimated_selectivity=float(cand["estimated_selectivity"]) if cand else 1.0,
-                        threshold=float(st.session_state.threshold),
-                        before_measurement=s2["measurement"],
-                        after_measurement=s5["measurement"],
-                        ranked_candidates=s3.get("ranked_candidates", []),
-                    )
-                )
-                st.session_state.step6_data = comp
-
-            comp = st.session_state.step6_data
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Predicted Speedup (XGBoost)", f"{comp['predicted_speedup']:.2f}x")
-            k2.metric("Actual Measured Speedup", f"{comp['actual_speedup']:.2f}x")
-            k3.metric("Relative Difference (%)", f"{comp['error_pct']:.1f}%")
-            k4.metric("Rows Examined Reduction", f"{comp['row_reduction_pct']:.2f}%")
-
-            comp_table = pd.DataFrame(
-                [
-                    {
-                        "Metric": "Median Execution Time (ms)",
-                        "Before Index": f"{comp['time_before_ms']:.3f} ms",
-                        "After Index": f"{comp['time_after_ms']:.3f} ms",
-                        "Improvement / Ratio": f"{comp['actual_speedup']:.2f}x speedup",
-                    },
-                    {
-                        "Metric": "EXPLAIN Estimated Rows Examined",
-                        "Before Index": f"{comp['rows_before']:,}",
-                        "After Index": f"{comp['rows_after']:,}",
-                        "Improvement / Ratio": f"-{comp['row_reduction_pct']:.2f}% rows",
-                    },
-                    {
-                        "Metric": "MySQL Access Type (`type`)",
-                        "Before Index": comp["access_type_before"],
-                        "After Index": f"{comp['access_type_after']} (key: {comp['key_used_after'] or 'NULL'})",
-                        "Improvement / Ratio": f"Predicted: {comp['predicted_speedup']:.2f}x (err: {comp['error_pct']:.1f}%)",
-                    },
-                ]
-            )
-            st.subheader("Before vs. After Summary Table")
-            st.table(comp_table)
-
-            ch1, ch2 = st.columns(2)
-            with ch1:
-                fig_time = go.Figure(
-                    data=[
-                        go.Bar(
-                            x=["Before Index (ms)", "After Index (ms)"],
-                            y=[comp["time_before_ms"], comp["time_after_ms"]],
-                            marker_color=["#ef4444", "#10b981"],
-                            text=[
-                                f"{comp['time_before_ms']:.2f} ms",
-                                f"{comp['time_after_ms']:.2f} ms",
-                            ],
-                            textposition="auto",
-                        )
-                    ]
-                )
-                fig_time.update_layout(
-                    title="Median Execution Time: Before vs. After (ms)",
-                    yaxis_title="Milliseconds (lower is better)",
-                )
-                st.plotly_chart(fig_time, use_container_width=True)
-
-            with ch2:
-                fig_spd = go.Figure(
-                    data=[
-                        go.Bar(
-                            x=["XGBoost Predicted Speedup", "Actual Live Speedup"],
-                            y=[comp["predicted_speedup"], comp["actual_speedup"]],
-                            marker_color=["#6366f1", "#10b981"],
-                            text=[
-                                f"{comp['predicted_speedup']:.2f}x",
-                                f"{comp['actual_speedup']:.2f}x",
-                            ],
-                            textposition="auto",
-                        )
-                    ]
-                )
-                fig_spd.update_layout(
-                    title="Predicted vs. Actual Speedup Ratio (x)",
-                    yaxis_title="Speedup Factor (x)",
-                )
-                st.plotly_chart(fig_spd, use_container_width=True)
-
-            st.subheader("Plain-English Diagnostic Analysis")
-            st.info(comp["explanation"])
-            st.success(f"Run log automatically saved to `{comp['saved_file']}`")
+            except Exception as exc:
+                st.error(f"Index creation failed: {exc}")
+    next_button(4, enabled=bool(_ss("created_index")))
 
 
-if __name__ == "__main__":
-    main()
+def step5(db: MySQLAdapter, table: str) -> None:
+    if st.button("▶ Run same query with index", type="primary"):
+        try:
+            with st.spinner(f"Running {config.DASHBOARD_RUNS} times (first run discarded)..."):
+                st.session_state["after"] = _measure(db, _ss("sql"))
+        except Exception as exc:
+            st.error(f"Query failed: {exc}")
+            return
+    after = _ss("after")
+    if after:
+        base = _ss("baseline")
+        c1, c2 = st.columns(2)
+        c1.metric("Median time (with index)", f"{after['median_s']*1000:.2f} ms",
+                  delta=f"{(after['median_s']-base['median_s'])*1000:.2f} ms",
+                  delta_color="inverse")
+        c2.metric("Rows examined (EXPLAIN)", f"{after['rows_examined']:,}",
+                  delta=f"{after['rows_examined']-base['rows_examined']:,}",
+                  delta_color="inverse")
+        st.markdown("**EXPLAIN**")
+        _dataframe(_safe_df(after["explain"]))
+        st.markdown("**EXPLAIN ANALYZE**")
+        st.code(after["explain_analyze"])
+    next_button(5, enabled=after is not None)
+
+
+def step6(db: MySQLAdapter, table: str) -> None:
+    base, after, rec = _ss("baseline"), _ss("after"), _ss("rec")
+    cand = rec.recommended
+    actual = base["median_s"] / max(after["median_s"], 1e-9)
+    predicted = cand.predicted_speedup
+    err_pct = abs(predicted - actual) / max(actual, 1e-9) * 100.0
+
+    _dataframe(pd.DataFrame([{
+        "Metric": m, "Before (no index)": b, "After (index)": a,
+    } for m, b, a in [
+        ("Median time (ms)", f"{base['median_s']*1000:.2f}", f"{after['median_s']*1000:.2f}"),
+        ("Rows examined", f"{base['rows_examined']:,}", f"{after['rows_examined']:,}"),
+    ]]), hide_index=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("ML predicted speedup", f"{predicted:.2f}x")
+    c2.metric("Actual speedup", f"{actual:.2f}x")
+    c3.metric("Prediction error", f"{err_pct:.1f}%")
+
+    fig = go.Figure(go.Bar(x=["Predicted", "Actual"], y=[predicted, actual],
+                           text=[f"{predicted:.2f}x", f"{actual:.2f}x"],
+                           textposition="auto"))
+    fig.update_layout(title="Predicted vs actual speedup", yaxis_title="speedup (x)",
+                      height=340)
+    _plotly_chart(fig)
+
+    prow = _plan_row(after["explain"], table)
+    explanation = explain_prediction_vs_actual(
+        predicted_speedup=predicted, actual_speedup=actual,
+        rows_before=base["rows_examined"], rows_after=after["rows_examined"],
+        time_before_s=base["median_s"], time_after_s=after["median_s"],
+        access_type_after=str(prow.get("type") or ""),
+        key_used_after=str(prow.get("key") or ""),
+        estimated_selectivity=cand.estimated_selectivity,
+    )
+    st.markdown("### Why the prediction and reality differ")
+    st.markdown(explanation)
+
+    if not _ss("saved_path"):
+        config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = config.RESULTS_DIR / f"run_{datetime.now():%Y%m%d_%H%M%S}.json"
+        path.write_text(json.dumps({
+            "database": _ss("database"), "table": table, "sql": _ss("sql"),
+            "ddl": cand.candidate.ddl, "predicted_speedup": predicted,
+            "actual_speedup": actual, "error_pct": err_pct,
+            "time_before_ms": base["median_s"] * 1000, "time_after_ms": after["median_s"] * 1000,
+            "rows_before": base["rows_examined"], "rows_after": after["rows_examined"],
+            "explain_before": base["explain"], "explain_after": after["explain"],
+            "explanation": explanation,
+        }, default=str, indent=2))
+        st.session_state["saved_path"] = str(path)
+    st.caption(f"Run saved to {_ss('saved_path')}")
+
+
+# ─────────────────────────── main ───────────────────────────
+def main() -> None:
+    sidebar()
+    st.title("IndexBuddy: ML-based automatic index recommendation")
+    status_bar()
+    db = _get_db()
+    if db is None or not _ss("table"):
+        st.info("👈 Connect to MySQL and choose a database and table in the sidebar.")
+        return
+
+    table = _ss("table")
+    step = _ss("step", 1)
+    runners = {1: step1, 2: step2, 3: step3, 4: step4, 5: step5, 6: step6}
+    for i in range(1, min(step, 6) + 1):
+        st.divider()
+        st.header(f"Step {i}: {STEP_TITLES[i]}")
+        try:
+            runners[i](db, table)
+        except Exception as exc:
+            st.error(f"Step {i} failed: {exc}")
+
+
+main()

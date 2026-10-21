@@ -41,6 +41,9 @@ LABELING_RUNS: int = 5          # total runs per measurement (1 warm-up discarde
 DASHBOARD_RUNS: int = 10        # total runs in the dashboard demo (1 warm-up discarded)
 LARGE_TABLE_SAMPLE_THRESHOLD: int = 200_000  # use sampling when table rows exceed this
 SAMPLE_SIZE_ROWS: int = 50_000
+# Skip labeling queries whose unindexed runtime is below this many ms: speedups
+# measured on sub-few-millisecond queries are mostly timing noise.
+MIN_BASELINE_MS: float = float(os.getenv("MIN_BASELINE_MS", "3.0"))
 
 # ── Candidate generation ────────────────────────────────────────
 MAX_CANDIDATES_PER_QUERY: int = 12

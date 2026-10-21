@@ -1,13 +1,13 @@
 """
 evaluation/evaluate_baselines.py
 ────────────────────────────────
-Compares three index recommendation strategies on the held-out query templates
-(never seen during model training):
-  1. No-Index Baseline (always predicts 1.0x speedup, recommends no index)
-  2. Legacy Rule-Based Scorer (heuristic from original IndexBuddy repo)
-  3. XGBoost Speedup Regressor (our trained ML model)
+Compares three strategies on the HELD-OUT real databases (never seen in training):
+  1. No-Index baseline
+  2. Legacy rule-based scorer
+  3. XGBoost speedup model
 
-Writes a detailed Markdown report to ``evaluation/results.md``.
+Writes evaluation/results.md. Every number and every sentence is computed from the
+measured data; nothing is hardcoded about any specific database or table.
 """
 from __future__ import annotations
 
@@ -21,190 +21,144 @@ from scipy.stats import spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 import config
-from baselines.rule_based import LegacyRuleBasedScorer, NoIndexBaseline
+from baselines.rule_based import LegacyRuleBasedScorer
 from features.extract import FEATURE_NAMES
 from models.predict import SpeedupPredictor
 from models.train import compute_query_level_accuracy
+
+
+def _metrics(df: pd.DataFrame, col: str) -> Dict[str, float]:
+    y, p = df["log_speedup"].astype(float), df[col].astype(float)
+    rho = 0.0
+    if len(df) > 2 and np.std(p) > 1e-9:
+        r = spearmanr(y, p).statistic
+        rho = 0.0 if math.isnan(float(r)) else float(r)
+    q = compute_query_level_accuracy(df, col)
+    return {
+        "mae": float(mean_absolute_error(y, p)),
+        "rmse": float(math.sqrt(mean_squared_error(y, p))),
+        "rho": rho,
+        "top1_exact": q["top1_exact_accuracy"],
+        "top1_eff": q["top1_effective_accuracy"],
+        "decision": q["index_decision_accuracy"],
+        "geo": q["geometric_mean_speedup"],
+        "oracle": q["oracle_geometric_mean_speedup"],
+    }
+
+
+def _row(label: str, m: Dict[str, float]) -> str:
+    return (
+        f"| {label} | {m['mae']:.4f} | {m['rmse']:.4f} | {m['rho']:.4f} | "
+        f"{m['top1_exact']*100:.1f}% | {m['top1_eff']*100:.1f}% | "
+        f"{m['decision']*100:.1f}% | {m['geo']:.2f}x (oracle {m['oracle']:.2f}x) |"
+    )
+
+
+HEADER = (
+    "| Method | MAE (log speedup) | RMSE (log speedup) | Spearman | Top-1 exact | "
+    "Top-1 effective | Index/no-index decision | Geo-mean speedup |\n"
+    "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+)
 
 
 def evaluate_all(
     csv_path: str = config.LABEL_CSV,
     results_md_path: str = "evaluation/results.md",
 ) -> Dict[str, Any]:
-    """Run held-out evaluation across all baselines and write evaluation/results.md."""
     df = pd.read_csv(csv_path)
-    test_df = df[df["split_group"].isin(["test", "demo_holdout"])].copy()
-    train_df = df[df["split_group"] == "train"].copy()
+    train_df = df[df["database_name"].isin(config.TRAIN_DATABASES)].copy()
+    test_df = df[df["database_name"].isin(config.HELDOUT_TEST_DATABASES)].copy()
+    if test_df.empty:
+        raise SystemExit("No labeled rows for the held-out databases. Run labeling first.")
 
     predictor = SpeedupPredictor()
     bundle = predictor.load()
-    model = predictor.model
 
-    X_test = test_df[FEATURE_NAMES].astype(float)
-    y_test = test_df["log_speedup"].astype(float)
-
-    # 1. No-Index Baseline predictions
-    test_df["noindex_log_pred"] = 0.0
-
-    # 2. Legacy Rule-Based Scorer predictions
-    test_df["rule_log_pred"] = [
-        LegacyRuleBasedScorer.predict_log_speedup(row.to_dict())
-        for _, row in test_df.iterrows()
+    test_df["noindex"] = 0.0
+    test_df["rule"] = [
+        LegacyRuleBasedScorer.predict_log_speedup(r.to_dict()) for _, r in test_df.iterrows()
     ]
+    test_df["xgb"] = predictor.model.predict(test_df[FEATURE_NAMES].astype(float))
 
-    # 3. XGBoost ML Model predictions
-    test_df["xgb_log_pred"] = model.predict(X_test)
-    test_df["xgb_speedup_pred"] = np.exp(test_df["xgb_log_pred"])
+    methods = [("No-index baseline", "noindex"), ("Legacy rule-based scorer", "rule"),
+               ("XGBoost speedup model (ours)", "xgb")]
+    overall = {label: _metrics(test_df, col) for label, col in methods}
 
-    methods = [
-        ("No-Index Baseline", "noindex_log_pred"),
-        ("Legacy Rule-Based Scorer", "rule_log_pred"),
-        ("XGBoost Speedup Model (Ours)", "xgb_log_pred"),
-    ]
+    per_db: List[Dict[str, Any]] = []
+    for db_name, g in test_df.groupby("database_name"):
+        per_db.append({
+            "db": db_name, "queries": int(g["query_id"].nunique()), "pairs": len(g),
+            "xgb": _metrics(g, "xgb"), "rule": _metrics(g, "rule"),
+        })
 
-    summary_rows: List[Dict[str, Any]] = []
-    for label, col in methods:
-        preds = test_df[col].astype(float)
-        mae = float(mean_absolute_error(y_test, preds))
-        rmse = float(math.sqrt(mean_squared_error(y_test, preds)))
-        if np.std(preds) < 1e-9:
-            rho = 0.0
-        else:
-            rho = float(spearmanr(y_test, preds).statistic)
+    wins_mae = sum(1 for r in per_db if r["xgb"]["mae"] < r["rule"]["mae"])
+    wins_rho = sum(1 for r in per_db if r["xgb"]["rho"] > r["rule"]["rho"])
+    wins_geo = sum(1 for r in per_db if r["xgb"]["geo"] > r["rule"]["geo"])
 
-        q_acc = compute_query_level_accuracy(test_df, col)
-        summary_rows.append(
-            {
-                "method": label,
-                "mae_log": mae,
-                "rmse_log": rmse,
-                "spearman_rho": rho,
-                "top1_exact_acc": q_acc["top1_exact_accuracy"],
-                "top1_effective_acc": q_acc["top1_effective_accuracy"],
-                "decision_acc": q_acc["index_decision_accuracy"],
-                "geo_mean_speedup": q_acc["geometric_mean_speedup"],
-                "oracle_geo_mean": q_acc["oracle_geometric_mean_speedup"],
-            }
+    L: List[str] = []
+    L.append("# IndexBuddy: Empirical Evaluation (leave-databases-out)\n")
+    L.append("## 1. Setup\n")
+    L.append(f"- Data: real databases from the CTU Prague Relational Learning Repository, "
+             f"restored on local MySQL; all timings measured locally.")
+    L.append(f"- Training databases ({train_df['database_name'].nunique()}): "
+             f"{', '.join(sorted(train_df['database_name'].unique()))} "
+             f"({train_df['query_id'].nunique()} queries, {len(train_df)} labeled pairs)")
+    L.append(f"- Held-out databases ({test_df['database_name'].nunique()}): "
+             f"{', '.join(sorted(test_df['database_name'].unique()))} "
+             f"({test_df['query_id'].nunique()} queries, {len(test_df)} labeled pairs)")
+    L.append(f"- Recommendation threshold: predicted speedup >= {config.SPEEDUP_THRESHOLD:.2f}x, "
+             f"otherwise no index.")
+    L.append("- Queries are generated from the real schemas and real value distributions "
+             "(these datasets contain no real query logs). Labels are measured speedups "
+             "(median of timed runs, warm-up discarded) with and without each candidate index.\n")
+
+    L.append("## 2. Overall comparison on held-out databases\n")
+    L.append(HEADER)
+    for label, _ in methods:
+        L.append(_row(label, overall[label]))
+    L.append("")
+
+    L.append("## 3. Per held-out database\n")
+    L.append("| Database | Queries | Pairs | XGB MAE | Rule MAE | XGB Spearman | Rule Spearman | "
+             "XGB geo-speedup | Rule geo-speedup | Oracle |")
+    L.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+    for r in per_db:
+        L.append(
+            f"| {r['db']} | {r['queries']} | {r['pairs']} | {r['xgb']['mae']:.4f} | "
+            f"{r['rule']['mae']:.4f} | {r['xgb']['rho']:.4f} | {r['rule']['rho']:.4f} | "
+            f"{r['xgb']['geo']:.2f}x | {r['rule']['geo']:.2f}x | {r['xgb']['oracle']:.2f}x |"
         )
+    L.append("")
 
-    # Per-template breakdown on held-out templates
-    template_rows: List[Dict[str, Any]] = []
-    for tid, t_df in test_df.groupby("template_id"):
-        desc = str(t_df["template_desc"].iloc[0])
-        s_grp = str(t_df["split_group"].iloc[0])
-        t_mae = float(
-            mean_absolute_error(t_df["log_speedup"], t_df["xgb_log_pred"])
-        )
-        r_mae = float(
-            mean_absolute_error(t_df["log_speedup"], t_df["rule_log_pred"])
-        )
-        xgb_q = compute_query_level_accuracy(t_df, "xgb_log_pred")
-        rule_q = compute_query_level_accuracy(t_df, "rule_log_pred")
-        template_rows.append(
-            {
-                "template_id": tid,
-                "split_group": s_grp,
-                "description": desc,
-                "num_queries": int(t_df["query_id"].nunique()),
-                "num_pairs": len(t_df),
-                "xgb_mae": t_mae,
-                "rule_mae": r_mae,
-                "xgb_top1_eff": xgb_q["top1_effective_accuracy"],
-                "rule_top1_eff": rule_q["top1_effective_accuracy"],
-                "xgb_geo_speedup": xgb_q["geometric_mean_speedup"],
-                "rule_geo_speedup": rule_q["geometric_mean_speedup"],
-                "oracle_geo_speedup": xgb_q["oracle_geometric_mean_speedup"],
-            }
-        )
+    L.append("## 4. Top SHAP features (held-out data)\n")
+    L.append("Summary plot: `evaluation/shap_summary.png`.\n")
+    L.append("| Rank | Feature | Mean abs SHAP |\n| :---: | :--- | :---: |")
+    for i, (fname, val) in enumerate(bundle.get("top_shap_features", [])[:12], 1):
+        L.append(f"| {i} | `{fname}` | {float(val):.4f} |")
+    L.append("")
 
-    # Write evaluation/results.md
-    out_path = Path(results_md_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    n = len(per_db)
+    L.append("## 5. Findings (computed from the results above)\n")
+    L.append(f"- The ML model has lower log-speedup MAE than the rule-based scorer on "
+             f"{wins_mae} of {n} held-out databases, higher rank correlation on {wins_rho} of {n}, "
+             f"and higher achieved geometric-mean speedup on {wins_geo} of {n}.")
+    x, rl = overall["XGBoost speedup model (ours)"], overall["Legacy rule-based scorer"]
+    L.append(f"- Overall MAE: {x['mae']:.3f} (ML) vs {rl['mae']:.3f} (rules); "
+             f"Spearman: {x['rho']:.3f} vs {rl['rho']:.3f}.")
+    L.append(f"- Achieved geometric-mean speedup: {x['geo']:.2f}x (ML) vs {rl['geo']:.2f}x (rules) "
+             f"vs {x['oracle']:.2f}x for the oracle that always picks the best measured index.")
+    L.append("\n## 6. Limitations\n")
+    L.append("- Few databases and a modest number of labeled queries per database; results "
+             "can change with more data.")
+    L.append("- Workloads are synthetic-from-real-data, not production query logs.")
+    L.append("- Timings come from a single local MySQL instance; cached pages and shared "
+             "hardware add noise to small queries.")
 
-    top_shap = bundle.get("top_shap_features", [])
-
-    md_lines: List[str] = [
-        "# IndexBuddy — Empirical Evaluation & Baseline Comparison",
-        "",
-        "## 1. Experimental Setup & Template-Level Split",
-        "",
-        "- **Database Engine**: MySQL 8.0.46 (`InnoDB`, 1,000,000 rows in `orders_benchmark`, 100,000 rows in `customers_benchmark`)",
-        f"- **Total Measured Workload**: {len(df)} `(query, candidate_index)` pairs across {df['query_id'].nunique()} queries and {df['template_id'].nunique()} canonical SQL templates",
-        f"- **Training Set (`split_group = train`)**: {len(train_df)} pairs across {train_df['query_id'].nunique()} queries ({train_df['template_id'].nunique()} templates: `{', '.join(sorted(train_df['template_id'].unique()))}`)",
-        f"- **Held-Out Evaluation Set (`test` + `demo_holdout`)**: {len(test_df)} pairs across {test_df['query_id'].nunique()} queries ({test_df['template_id'].nunique()} unseen templates: `{', '.join(sorted(test_df['template_id'].unique()))}`)",
-        "- **Zero Template Leakage**: Split is performed strictly by canonical SQL template (`sqlglot` AST normalized), never by random row.",
-        f"- **Recommendation Threshold**: Predicted speedup $\\ge {config.SPEEDUP_THRESHOLD:.2f}\\times$ (otherwise recommend `NO_INDEX`).",
-        "",
-        "---",
-        "",
-        "## 2. Held-Out Template Comparison: Baselines vs. XGBoost Speedup Model",
-        "",
-        "| Method | MAE ($\\log$ speedup) $\\downarrow$ | RMSE ($\\log$ speedup) $\\downarrow$ | Spearman $\\rho$ $\\uparrow$ | Top-1 Exact Acc $\\uparrow$ | Top-1 Effective Acc $\\uparrow$ | Index/No-Index Decision Acc $\\uparrow$ | Geometric Mean Speedup Achieved $\\uparrow$ |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
-    ]
-
-    for r in summary_rows:
-        md_lines.append(
-            f"| **{r['method']}** | `{r['mae_log']:.4f}` | `{r['rmse_log']:.4f}` | "
-            f"`{r['spearman_rho']:.4f}` | `{r['top1_exact_acc']*100:.1f}%` | "
-            f"`{r['top1_effective_acc']*100:.1f}%` | `{r['decision_acc']*100:.1f}%` | "
-            f"**`{r['geo_mean_speedup']:.2f}x`** *(Oracle: {r['oracle_geo_mean']:.2f}x)* |"
-        )
-
-    md_lines.extend(
-        [
-            "",
-            "---",
-            "",
-            "## 3. Per-Template Breakdown on Held-Out Templates",
-            "",
-            "| Template | Split Group | Template Description | Queries | Pairs | XGBoost MAE $\\downarrow$ | Rule-Based MAE $\\downarrow$ | XGBoost Top-1 Effective Acc $\\uparrow$ | Rule-Based Top-1 Effective Acc $\\uparrow$ | XGBoost Geo-Mean Speedup $\\uparrow$ | Rule-Based Geo-Mean Speedup $\\uparrow$ | Oracle Geo-Mean Speedup |",
-            "| :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
-        ]
-    )
-
-    for tr in template_rows:
-        md_lines.append(
-            f"| `{tr['template_id']}` | `{tr['split_group']}` | {tr['description']} | "
-            f"{tr['num_queries']} | {tr['num_pairs']} | `{tr['xgb_mae']:.4f}` | `{tr['rule_mae']:.4f}` | "
-            f"`{tr['xgb_top1_eff']*100:.1f}%` | `{tr['rule_top1_eff']*100:.1f}%` | "
-            f"**`{tr['xgb_geo_speedup']:.2f}x`** | `{tr['rule_geo_speedup']:.2f}x` | `{tr['oracle_geo_speedup']:.2f}x` |"
-        )
-
-    md_lines.extend(
-        [
-            "",
-            "---",
-            "",
-            "## 4. Top SHAP Feature Importances (Held-Out Templates)",
-            "",
-            " Summary plot saved to `evaluation/shap_summary.png`.",
-            "",
-            "| Rank | Feature Name | Mean $|\\text{SHAP}|$ Impact on $\\log(\\text{speedup})$ |",
-            "| :---: | :--- | :---: |",
-        ]
-    )
-
-    for rank, (fname, sval) in enumerate(top_shap[:12], 1):
-        md_lines.append(f"| {rank} | `{fname}` | `{sval:.4f}` |")
-
-    md_lines.extend(
-        [
-            "",
-            "---",
-            "",
-            "## 5. Key Findings & Why the ML Model Outperforms Rule-Based Heuristics",
-            "",
-            "1. **Discriminating Skewed Low-Selectivity Filters (`T03`)**: On `WHERE status = 'completed'` (~70% of the 1M-row table), creating an index yields `~1.0x` speedup (the MySQL cost-based optimizer ignores the secondary index to avoid 700k random bookmark lookups). Our XGBoost model uses catalog MCV selectivity features to predict `< 1.5x` speedup and recommends **No Index**, whereas static rules fail to calibrate actual log-speedup magnitudes.",
-            "2. **Composite Index Column Ordering (`col1` vs `col2`)**: On `T11` (`WHERE customer_id = ? AND order_date >= ? ORDER BY order_date DESC LIMIT 25`), placing the equality column first `(customer_id, order_date)` achieves **>1,500x speedup**, whereas indexing `(order_date)` alone causes a large range scan (`0.14x` speedup, i.e. 7x slower than a full table scan!). The legacy rule-based scorer favored single-column indexes and ignored second-column B-tree prefix interactions.",
-            "3. **JOIN + Filter Disambiguation (`T16`)**: When joining `orders_benchmark` and `customers_benchmark` with `WHERE o.product_id = ? AND c.tier = ?`, the legacy rule-based scorer gave a flat bonus for `has_join` without distinguishing whether `product_id` or `customer_id` should lead the composite index on `orders_benchmark`.",
-            "",
-        ]
-    )
-
-    out_path.write_text("\n".join(md_lines), encoding="utf-8")
-    print(f"\nWrote baseline comparison report to {out_path}")
-    return {"summary": summary_rows, "templates": template_rows}
+    out = Path(results_md_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(L) + "\n", encoding="utf-8")
+    print(f"Wrote {out}")
+    return {"overall": overall, "per_db": per_db}
 
 
 if __name__ == "__main__":

@@ -449,6 +449,14 @@ def label_workload(
                 print(f"  [SKIP QUERY] {qid} failed baseline execution: {exc}")
                 continue
 
+            if time_before * 1000.0 < config.MIN_BASELINE_MS:
+                print(
+                    f"  [SKIP QUERY] {qid}: baseline {time_before*1000.0:.2f} ms < "
+                    f"{config.MIN_BASELINE_MS} ms (timing noise)"
+                )
+                completed_qids.add(qid)
+                continue
+
             for cand in candidates:
                 try:
                     feats = extract_features(parsed, cand, stats_cache, baseline_explain=base_exp)
